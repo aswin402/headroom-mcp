@@ -221,7 +221,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let server = HeadroomServer::new(cache);
     
     // Start the stdio transport server
-    server.serve(stdio()).await?;
+    let service = server.serve(stdio()).await?;
+    service.waiting().await?;
     
     Ok(())
 }
