@@ -4,6 +4,12 @@
 
 <p align="center"><strong>A high-performance, zero-dependency context compression layer and DOX scoping companion for AI coding agents, implemented as a native Rust MCP Server.</strong></p>
 
+<p align="center">
+  <a href="https://github.com/aswin402"><img src="https://img.shields.io/badge/Vibe__Coded__By-Aswin-ff007f?style=for-the-badge&logo=lightning&logoColor=white" alt="Vibe Coded By Aswin"></a>
+  <a href="https://github.com/agent0ai/dox"><img src="https://img.shields.io/badge/Inspired__By-dox-7928ca?style=for-the-badge" alt="Inspired by Dox"></a>
+  <a href="https://github.com/chopratejas/headroom"><img src="https://img.shields.io/badge/Inspired__By-headroom-00dfd8?style=for-the-badge" alt="Inspired by Headroom"></a>
+</p>
+
 ---
 
 ## What It Does
