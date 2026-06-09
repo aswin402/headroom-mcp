@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="100%" height="100%">
+  <defs>
+    <!-- Glowing Gradients -->
+    <linearGradient id="grad-accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff007f" />
+      <stop offset="50%" stop-color="#7928ca" />
+      <stop offset="100%" stop-color="#00dfd8" />
+    </linearGradient>
+    
+    <linearGradient id="grad-subtle" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#7928ca" stop-opacity="0.2" />
+      <stop offset="100%" stop-color="#00dfd8" stop-opacity="0.8" />
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <style>
+    .bg { fill: none; }
+    .title {
+      font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 56px;
+      font-weight: 900;
+      fill: #ffffff;
+      letter-spacing: 2px;
+    }
+    .subtitle {
+      font-family: 'Inter', -apple-system, sans-serif;
+      font-size: 16px;
+      fill: #8a8f98;
+      letter-spacing: 6px;
+      font-weight: 500;
+      text-transform: uppercase;
+    }
+    
+    /* Animation Keyframes */
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 0.8; filter: drop-shadow(0 0 2px rgba(0, 223, 216, 0.4)); }
+      50% { transform: scale(1.05); opacity: 1; filter: drop-shadow(0 0 15px rgba(255, 0, 127, 0.7)); }
+      100% { transform: scale(1); opacity: 0.8; filter: drop-shadow(0 0 2px rgba(0, 223, 216, 0.4)); }
+    }
+    
+    @keyframes dash {
+      to {
+        stroke-dashoffset: -40;
+      }
+    }
+    
+    @keyframes rotate-ring {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes float {
+      0% { transform: translateY(0px); }
+      50% { transform: translateY(-6px); }
+      100% { transform: translateY(0px); }
+    }
+
+    /* Applying Animations */
+    .animated-glow {
+      transform-origin: 150px 150px;
+      animation: pulse 4s ease-in-out infinite;
+    }
+    
+    .animated-ring {
+      transform-origin: 150px 150px;
+      animation: rotate-ring 15s linear infinite;
+      stroke-dasharray: 8 6;
+    }
+
+    .animated-flow {
+      stroke-dasharray: 10 10;
+      animation: dash 2s linear infinite;
+    }
+
+    .animated-float {
+      animation: float 6s ease-in-out infinite;
+    }
+  </style>
+
+  <!-- Background (Transparent) -->
+  <rect class="bg" width="800" height="300" />
+
+  <!-- Animated Icon Group -->
+  <g class="animated-float">
+    <!-- Outer Orbiting Ring -->
+    <circle class="animated-ring" cx="150" cy="150" r="85" fill="none" stroke="url(#grad-accent)" stroke-width="1.5" opacity="0.4" />
+    
+    <!-- Outer Hexagon representing the Context Limit / Boundary -->
+    <polygon points="150,55 232,102 232,197 150,245 68,197 68,102" fill="none" stroke="#333842" stroke-width="2" />
+    
+    <!-- Flowing data streams entering the box -->
+    <path class="animated-flow" d="M 40 102 C 90 102, 100 130, 130 130" fill="none" stroke="url(#grad-subtle)" stroke-width="2" />
+    <path class="animated-flow" d="M 40 197 C 90 197, 100 170, 130 170" fill="none" stroke="url(#grad-subtle)" stroke-width="2" />
+    
+    <!-- Core Compressed Node (Glowing Core) -->
+    <g class="animated-glow">
+      <!-- Outer glowing circle -->
+      <circle cx="150" cy="150" r="42" fill="none" stroke="url(#grad-accent)" stroke-width="2" filter="url(#glow)" />
+      <!-- Inner dense circle -->
+      <circle cx="150" cy="150" r="28" fill="url(#grad-accent)" opacity="0.95" />
+      <!-- Core center -->
+      <circle cx="150" cy="150" r="8" fill="#ffffff" />
+    </g>
+  </g>
+
+  <!-- Typography Group -->
+  <g transform="translate(290, 0)">
+    <!-- Main Title -->
+    <text x="0" y="145" class="title">HEADROOM<tspan fill="url(#grad-accent)">_</tspan></text>
+    
+    <!-- Subtitle -->
+    <text x="3" y="188" class="subtitle">Context Compression MCP</text>
+  </g>
+</svg>

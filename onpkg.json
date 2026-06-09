@@ -1,0 +1,29 @@
+{
+  "agent_instructions": {
+    "active_skills": [
+      "rust.md"
+    ],
+    "docs_directory": "onpkg_docs/"
+  },
+  "architecture": {
+    "entrypoint": "src/main.rs"
+  },
+  "packages": {
+    "added_by_agent": [],
+    "core": [
+      "anyhow",
+      "clap"
+    ]
+  },
+  "project": {
+    "name": "agentcpower",
+    "package_manager": "cargo",
+    "runtime": "rust",
+    "stack": "rust-cli"
+  },
+  "scripts": {
+    "build": "cargo build",
+    "dev": "cargo run",
+    "test": "cargo test"
+  }
+}
