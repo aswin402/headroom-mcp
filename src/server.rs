@@ -3,17 +3,13 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::schemars::JsonSchema;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
-
-use crate::cache::CacheEntry;
-use crate::config::{
-    DEFAULT_JSON_THRESHOLD, DEFAULT_LOG_THRESHOLD, MAX_CACHE_BYTES, MAX_INPUT_SIZE, SCOPE_FILES,
-};
+use crate::config::{Config, SCOPE_FILES};
+use crate::intelligence::tokens::estimate_tokens;
 use crate::compression::{
     auto_detect_content_type, compress_code, compress_csv, compress_json, compress_logs,
     detect_content_type_from_ext,
@@ -25,7 +21,8 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct HeadroomServer {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-    pub cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    pub config: Arc<Config>,
+    pub cache: Arc<dyn crate::cache::CacheBackend>,
     pub start_time: Instant,
 }
 
@@ -46,6 +43,8 @@ pub struct CompressContentRequest {
     pub content_type: String,
     #[schemars(description = "Optional compression threshold override.")]
     pub threshold: Option<usize>,
+    #[schemars(description = "If true, returns a preview of compression without caching.")]
+    pub preview: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -62,6 +61,8 @@ pub struct CompressFileRequest {
     pub content_type: Option<String>,
     #[schemars(description = "Optional compression threshold override.")]
     pub threshold: Option<usize>,
+    #[schemars(description = "If true, returns a preview of compression without caching.")]
+    pub preview: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -72,6 +73,35 @@ pub struct ClearCacheRequest {}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ServerInfoRequest {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PingRequest {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CountTokensRequest {
+    #[schemars(description = "The text to estimate tokens for.")]
+    pub text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchCacheRequest {
+    #[schemars(description = "Search query to find relevant cached entries.")]
+    pub query: String,
+    #[schemars(description = "Maximum number of results to return.")]
+    pub max_results: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ExportCacheRequest {
+    #[schemars(description = "File path to export cache to (JSON format).")]
+    pub file_path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ImportCacheRequest {
+    #[schemars(description = "File path to import cache from (JSON format).")]
+    pub file_path: String,
+}
 
 fn mcp_error<E: std::fmt::Display>(err: E) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
@@ -87,11 +117,28 @@ fn log_error(msg: &str) {
 
 #[tool_router(server_handler)]
 impl HeadroomServer {
-    pub fn new(cache: Arc<Mutex<HashMap<String, CacheEntry>>>) -> Self {
+    pub fn new(config: Arc<Config>, cache: Arc<dyn crate::cache::CacheBackend>) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            config,
             cache,
             start_time: Instant::now(),
+        }
+    }
+
+    fn get_workspace_root(&self) -> Result<std::path::PathBuf, rmcp::ErrorData> {
+        if let Some(ref root_str) = self.config.workspace_root {
+            Path::new(root_str)
+                .canonicalize()
+                .map_err(|e| rmcp::ErrorData::internal_error(
+                    format!("Failed to resolve configured workspace root '{}': {}", root_str, e),
+                    None,
+                ))
+        } else {
+            std::env::current_dir()
+                .map_err(mcp_error)?
+                .canonicalize()
+                .map_err(mcp_error)
         }
     }
 
@@ -105,10 +152,7 @@ impl HeadroomServer {
         log_info(&format!("scope_context: {}", req.0.target_path));
         let path = Path::new(&req.0.target_path);
         
-        let workspace_root = std::env::current_dir()
-            .map_err(mcp_error)?
-            .canonicalize()
-            .map_err(mcp_error)?;
+        let workspace_root = self.get_workspace_root()?;
 
         let absolute_path = if path.is_absolute() {
             path.to_path_buf()
@@ -194,9 +238,9 @@ impl HeadroomServer {
         }
 
         // Max input size check
-        if raw_text.len() > MAX_INPUT_SIZE {
+        if raw_text.len() > self.config.max_input_size {
             return Err(rmcp::ErrorData::internal_error(
-                format!("Content size exceeds maximum allowed size of {} bytes", MAX_INPUT_SIZE),
+                format!("Content size exceeds maximum allowed size of {} bytes", self.config.max_input_size),
                 None,
             ));
         }
@@ -218,59 +262,47 @@ impl HeadroomServer {
 
         let threshold = req.0.threshold;
         let compressed = match content_type_ref {
-            "json" => compress_json(raw_text, threshold.unwrap_or(DEFAULT_JSON_THRESHOLD)).map_err(mcp_error)?,
+            "json" => compress_json(raw_text, threshold.unwrap_or(self.config.json_threshold)).map_err(mcp_error)?,
             "code" | "yaml" | "markdown" => compress_code(raw_text),
             "csv" => compress_csv(raw_text),
-            _ => compress_logs(raw_text, threshold.unwrap_or(DEFAULT_LOG_THRESHOLD)),
+            _ => compress_logs(raw_text, threshold.unwrap_or(self.config.log_threshold)),
         };
 
-        // Generate highly unique CCR ID using timestamp and atomic counter
-        let time_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let ccr_id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
+        let is_preview = req.0.preview.unwrap_or(false);
+        let ccr_id = if is_preview {
+            "PREVIEW".to_string()
+        } else {
+            // Generate highly unique CCR ID using timestamp and atomic counter
+            let time_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
+            self.cache.insert(&id, req.0.raw_text.trim(), None).map_err(mcp_error)?;
+            id
+        };
 
-        // Cache only after successful compression, with LRU eviction
-        {
-            let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-            let mut total_size: usize = cache.values().map(|entry| entry.content.len()).sum();
-            
-            while total_size + raw_text.len() > MAX_CACHE_BYTES && !cache.is_empty() {
-                let mut oldest_key = None;
-                let mut oldest_time = Instant::now();
-                
-                for (k, entry) in cache.iter() {
-                    if entry.last_accessed < oldest_time {
-                        oldest_time = entry.last_accessed;
-                        oldest_key = Some(k.clone());
-                    }
-                }
-                
-                if let Some(k) = oldest_key {
-                    if let Some(removed) = cache.remove(&k) {
-                        total_size -= removed.content.len();
-                        log_info(&format!("Evicted entry {} from cache due to size limit", k));
-                    }
-                } else {
-                    break;
-                }
-            }
-            
-            cache.insert(
-                ccr_id.clone(),
-                CacheEntry {
-                    content: req.0.raw_text.clone(),
-                    last_accessed: Instant::now(),
-                },
-            );
+        let original_tokens = estimate_tokens(raw_text);
+        let compressed_tokens = estimate_tokens(&compressed);
+        let saved_pct = if original_tokens > 0 {
+            let saved = (original_tokens as f64 - compressed_tokens as f64) / original_tokens as f64 * 100.0;
+            format!("{:.1}%", saved.max(0.0))
+        } else {
+            "0.0%".to_string()
+        };
+
+        if is_preview {
+            Ok(format!(
+                "{}\n\n[PREVIEW - not cached | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call again with preview=false to register CCR]",
+                compressed, original_tokens, compressed_tokens, saved_pct
+            ))
+        } else {
+            Ok(format!(
+                "{}\n\n[CCR Ref: {} | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call retrieve_original tool to inspect full content if needed]",
+                compressed, ccr_id, original_tokens, compressed_tokens, saved_pct
+            ))
         }
-
-        Ok(format!(
-            "{} \n\n[CCR Ref: {} - call retrieve_original tool to inspect full content if needed]",
-            compressed, ccr_id
-        ))
     }
 
     #[tool(
@@ -291,10 +323,7 @@ impl HeadroomServer {
             // Sandboxed file read restricted to workspace
             let path_str = input.trim_start_matches("file://");
             let path = Path::new(path_str);
-            let workspace_root = std::env::current_dir()
-                .map_err(mcp_error)?
-                .canonicalize()
-                .map_err(mcp_error)?;
+            let workspace_root = self.get_workspace_root()?;
 
             let absolute_path = if path.is_absolute() {
                 path.to_path_buf()
@@ -325,13 +354,10 @@ impl HeadroomServer {
                 )),
             }
         } else {
-            // Retrieve from cache and update last_accessed time for LRU
-            let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(entry) = cache.get_mut(input) {
-                entry.last_accessed = Instant::now();
-                Ok(entry.content.clone())
-            } else {
-                Err(rmcp::ErrorData::internal_error(
+            // Retrieve from cache and update last_accessed time
+            match self.cache.get(input).map_err(mcp_error)? {
+                Some(content) => Ok(content),
+                None => Err(rmcp::ErrorData::internal_error(
                     format!("CCR reference ID '{}' not found or expired.", input),
                     None,
                 ))
@@ -350,10 +376,7 @@ impl HeadroomServer {
         log_info(&format!("compress_file: {}", path_str));
         let path = Path::new(path_str);
         
-        let workspace_root = std::env::current_dir()
-            .map_err(mcp_error)?
-            .canonicalize()
-            .map_err(mcp_error)?;
+        let workspace_root = self.get_workspace_root()?;
 
         let absolute_path = if path.is_absolute() {
             path.to_path_buf()
@@ -383,9 +406,9 @@ impl HeadroomServer {
             )
         })?;
 
-        if raw_text.len() > MAX_INPUT_SIZE {
+        if raw_text.len() > self.config.max_input_size {
             return Err(rmcp::ErrorData::internal_error(
-                format!("File size exceeds maximum allowed size of {} bytes", MAX_INPUT_SIZE),
+                format!("File size exceeds maximum allowed size of {} bytes", self.config.max_input_size),
                 None,
             ));
         }
@@ -406,59 +429,47 @@ impl HeadroomServer {
 
         let threshold = req.0.threshold;
         let compressed = match content_type_ref {
-            "json" => compress_json(&raw_text, threshold.unwrap_or(DEFAULT_JSON_THRESHOLD)).map_err(mcp_error)?,
+            "json" => compress_json(&raw_text, threshold.unwrap_or(self.config.json_threshold)).map_err(mcp_error)?,
             "code" | "yaml" | "markdown" => compress_code(&raw_text),
             "csv" => compress_csv(&raw_text),
-            _ => compress_logs(&raw_text, threshold.unwrap_or(DEFAULT_LOG_THRESHOLD)),
+            _ => compress_logs(&raw_text, threshold.unwrap_or(self.config.log_threshold)),
         };
 
-        // Generate highly unique CCR ID using timestamp and atomic counter
-        let time_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let ccr_id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
+        let is_preview = req.0.preview.unwrap_or(false);
+        let ccr_id = if is_preview {
+            "PREVIEW".to_string()
+        } else {
+            // Generate highly unique CCR ID using timestamp and atomic counter
+            let time_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
+            self.cache.insert(&id, &raw_text, None).map_err(mcp_error)?;
+            id
+        };
 
-        // Cache original text with LRU eviction
-        {
-            let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-            let mut total_size: usize = cache.values().map(|entry| entry.content.len()).sum();
-            
-            while total_size + raw_text.len() > MAX_CACHE_BYTES && !cache.is_empty() {
-                let mut oldest_key = None;
-                let mut oldest_time = Instant::now();
-                
-                for (k, entry) in cache.iter() {
-                    if entry.last_accessed < oldest_time {
-                        oldest_time = entry.last_accessed;
-                        oldest_key = Some(k.clone());
-                    }
-                }
-                
-                if let Some(k) = oldest_key {
-                    if let Some(removed) = cache.remove(&k) {
-                        total_size -= removed.content.len();
-                        log_info(&format!("Evicted entry {} from cache due to size limit", k));
-                    }
-                } else {
-                    break;
-                }
-            }
-            
-            cache.insert(
-                ccr_id.clone(),
-                CacheEntry {
-                    content: raw_text,
-                    last_accessed: Instant::now(),
-                },
-            );
+        let original_tokens = estimate_tokens(&raw_text);
+        let compressed_tokens = estimate_tokens(&compressed);
+        let saved_pct = if original_tokens > 0 {
+            let saved = (original_tokens as f64 - compressed_tokens as f64) / original_tokens as f64 * 100.0;
+            format!("{:.1}%", saved.max(0.0))
+        } else {
+            "0.0%".to_string()
+        };
+
+        if is_preview {
+            Ok(format!(
+                "{}\n\n[PREVIEW - not cached | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call again with preview=false to register CCR]",
+                compressed, original_tokens, compressed_tokens, saved_pct
+            ))
+        } else {
+            Ok(format!(
+                "{}\n\n[CCR Ref: {} | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call retrieve_original tool to inspect full content if needed]",
+                compressed, ccr_id, original_tokens, compressed_tokens, saved_pct
+            ))
         }
-
-        Ok(format!(
-            "{} \n\n[CCR Ref: {} - call retrieve_original tool to inspect full content if needed]",
-            compressed, ccr_id
-        ))
     }
 
     #[tool(description = "Returns statistics about the context cache.")]
@@ -467,14 +478,12 @@ impl HeadroomServer {
         _req: Parameters<CacheStatsRequest>,
     ) -> Result<String, rmcp::ErrorData> {
         log_info("cache_stats");
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        let count = cache.len();
-        let mut total_bytes = 0;
+        let count = self.cache.len().map_err(mcp_error)?;
+        let total_bytes = self.cache.total_bytes().map_err(mcp_error)?;
+        let stats = self.cache.stats().map_err(mcp_error)?;
         let mut items = Vec::new();
 
-        for (k, entry) in cache.iter() {
-            let bytes = entry.content.len();
-            total_bytes += bytes;
+        for (k, bytes) in stats {
             items.push(format!("  - {}: {} bytes", k, bytes));
         }
 
@@ -496,10 +505,7 @@ impl HeadroomServer {
         _req: Parameters<ClearCacheRequest>,
     ) -> Result<String, rmcp::ErrorData> {
         log_info("clear_cache");
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        let count = cache.len();
-        let total_bytes: usize = cache.values().map(|entry| entry.content.len()).sum();
-        cache.clear();
+        let (count, total_bytes) = self.cache.clear().map_err(mcp_error)?;
         Ok(format!(
             "Successfully cleared cache. Evicted {} items (freed {} bytes).",
             count, total_bytes
@@ -513,8 +519,7 @@ impl HeadroomServer {
     ) -> Result<String, rmcp::ErrorData> {
         log_info("server_info");
         let uptime_secs = self.start_time.elapsed().as_secs();
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        let count = cache.len();
+        let count = self.cache.len().map_err(mcp_error)?;
         
         Ok(format!(
             "Headroom MCP Server Info:\n\
@@ -523,13 +528,134 @@ impl HeadroomServer {
              - Cache Size: {} items\n\
              - Default Log Threshold: {} chars\n\
              - Default JSON Threshold: {} chars\n\
-             - Max Input Size: {} bytes",
+             - Max Input Size: {} bytes\n\
+             - Max Cache Size: {} bytes\n\
+             - Workspace Root: {:?}",
             env!("CARGO_PKG_VERSION"),
             uptime_secs,
             count,
-            DEFAULT_LOG_THRESHOLD,
-            DEFAULT_JSON_THRESHOLD,
-            MAX_INPUT_SIZE
+            self.config.log_threshold,
+            self.config.json_threshold,
+            self.config.max_input_size,
+            self.config.max_cache_bytes,
+            self.config.workspace_root
         ))
+    }
+
+    #[tool(description = "Health check. Returns 'ok' if the server is responsive.")]
+    async fn ping(&self, _req: Parameters<PingRequest>) -> Result<String, rmcp::ErrorData> {
+        log_info("ping");
+        Ok("ok".to_string())
+    }
+
+    #[tool(description = "Estimates the token count for a given text. Helps agents decide whether compression is needed.")]
+    async fn count_tokens(&self, req: Parameters<CountTokensRequest>) -> Result<String, rmcp::ErrorData> {
+        log_info("count_tokens");
+        let tokens = estimate_tokens(&req.0.text);
+        let chars = req.0.text.chars().count();
+        Ok(format!("Token estimate: {} tokens ({} characters)", tokens, chars))
+    }
+
+    #[tool(description = "Searches cached content by keyword. Returns matching CCR IDs and content snippets.")]
+    async fn search_cache(&self, req: Parameters<SearchCacheRequest>) -> Result<String, rmcp::ErrorData> {
+        log_info(&format!("search_cache: {}", req.0.query));
+        let results = self.cache.search(&req.0.query).map_err(mcp_error)?;
+        let max = req.0.max_results.unwrap_or(10);
+        let items: Vec<String> = results.iter().take(max).map(|(id, snippet)| {
+            format!("- {}: {}", id, snippet)
+        }).collect();
+
+        if items.is_empty() {
+            Ok(format!("No matches found for query '{}'.", req.0.query))
+        } else {
+            Ok(format!("Found {} matches:\n{}", items.len(), items.join("\n")))
+        }
+    }
+
+    #[tool(description = "Exports the entire cache to a JSON file for session portability.")]
+    async fn export_cache(&self, req: Parameters<ExportCacheRequest>) -> Result<String, rmcp::ErrorData> {
+        let path_str = req.0.file_path.trim_start_matches("file://");
+        log_info(&format!("export_cache to: {}", path_str));
+        
+        let workspace_root = self.get_workspace_root()?;
+        let path = Path::new(path_str);
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_root.join(path)
+        };
+
+        let parent = absolute_path.parent().unwrap_or(&workspace_root);
+        let canonical_parent = parent.canonicalize().map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("Parent directory verification failed for '{}': {}", path_str, e),
+                None,
+            )
+        })?;
+
+        if !canonical_parent.starts_with(&workspace_root) {
+            log_error(&format!("Access denied for export path: {}", path_str));
+            return Err(rmcp::ErrorData::internal_error(
+                format!("Access denied: export path '{}' escapes workspace root", path_str),
+                None,
+            ));
+        }
+
+        let entries = self.cache.export_all().map_err(mcp_error)?;
+        let json_str = serde_json::to_string_pretty(&entries).map_err(mcp_error)?;
+        
+        fs::write(&absolute_path, json_str).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("Failed to write export file: {}", e),
+                None,
+            )
+        })?;
+
+        Ok(format!("Successfully exported {} cache entries to '{}'.", entries.len(), path_str))
+    }
+
+    #[tool(description = "Imports cached entries from a previously exported JSON file.")]
+    async fn import_cache(&self, req: Parameters<ImportCacheRequest>) -> Result<String, rmcp::ErrorData> {
+        let path_str = req.0.file_path.trim_start_matches("file://");
+        log_info(&format!("import_cache from: {}", path_str));
+
+        let workspace_root = self.get_workspace_root()?;
+        let path = Path::new(path_str);
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_root.join(path)
+        };
+
+        let canonical = absolute_path.canonicalize().map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("Path verification failed for '{}': {}", path_str, e),
+                None,
+            )
+        })?;
+
+        if !canonical.starts_with(&workspace_root) {
+            log_error(&format!("Access denied for import path: {}", path_str));
+            return Err(rmcp::ErrorData::internal_error(
+                format!("Access denied: import path '{}' escapes workspace root", path_str),
+                None,
+            ));
+        }
+
+        let json_str = fs::read_to_string(canonical).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("Failed to read import file: {}", e),
+                None,
+            )
+        })?;
+
+        let entries: Vec<(String, String, Option<String>, String)> = serde_json::from_str(&json_str).map_err(mcp_error)?;
+        let mut count = 0;
+        for (id, content, session, _) in &entries {
+            self.cache.insert(id, content, session.as_deref()).map_err(mcp_error)?;
+            count += 1;
+        }
+
+        Ok(format!("Successfully imported {} cache entries from '{}'.", count, path_str))
     }
 }
