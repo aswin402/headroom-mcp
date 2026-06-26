@@ -17,6 +17,11 @@ pub trait CacheBackend: Send + Sync {
     #[allow(dead_code)]
     fn expire_old(&self, max_age_hours: u64) -> Result<usize>;
     fn export_all(&self) -> Result<Vec<(String, String, Option<String>, String)>>;
+    fn log_compression(&self, _tool: &str, _orig_bytes: usize, _comp_bytes: usize,
+                       _orig_tokens: usize, _comp_tokens: usize,
+                       _content_type: &str, _model_hint: Option<&str>) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -88,6 +93,71 @@ mod tests {
         
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(db_path_small);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sqlite_analytics() -> Result<()> {
+        let db_path = "/tmp/test_headroom_mcp_analytics.db";
+        let _ = std::fs::remove_file(db_path);
+        
+        let cache = SqliteCache::open(db_path, 100_000)?;
+        
+        // P16.T3: Verify table created
+        {
+            let conn = rusqlite::Connection::open(db_path)?;
+            let mut stmt = conn.prepare("PRAGMA table_info(compression_log)")?;
+            let mut rows = stmt.query([])?;
+            let mut has_columns = false;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                if name == "tool_name" || name == "original_bytes" {
+                    has_columns = true;
+                }
+            }
+            assert!(has_columns);
+        }
+
+        // P16.T4: log_compression inserts a row
+        cache.log_compression("compress_content", 1000, 300, 200, 60, "code", Some("claude-sonnet-4"))?;
+        cache.log_compression("run_and_compress", 500, 250, 100, 50, "logs", Some("gpt-4o"))?;
+        
+        {
+            let conn = rusqlite::Connection::open(db_path)?;
+            let count: i64 = conn.query_row("SELECT COUNT(*) FROM compression_log", [], |r| r.get(0))?;
+            assert_eq!(count, 2);
+        }
+
+        // P16.T5: query_stats aggregates correctly
+        let stats = cache.query_stats()?;
+        assert_eq!(stats.total_compressions, 2);
+        assert_eq!(stats.total_original_bytes, 1500);
+        assert_eq!(stats.total_compressed_bytes, 550);
+        assert_eq!(stats.total_original_tokens, 300);
+        assert_eq!(stats.total_compressed_tokens, 110);
+
+        // P16.T6: query_usage with filter
+        let usage_filtered = cache.query_usage(Some("claude-sonnet-4"))?;
+        assert_eq!(usage_filtered.len(), 1);
+        assert_eq!(usage_filtered[0].model, "claude-sonnet-4");
+        assert_eq!(usage_filtered[0].total_original_tokens, 200);
+        assert_eq!(usage_filtered[0].total_saved_tokens, 140);
+
+        // P16.T7: query_usage without filter
+        let usage_all = cache.query_usage(None)?;
+        assert_eq!(usage_all.len(), 2);
+
+        // P16.T8 & P16.T9: Pricing functions
+        assert_eq!(crate::intelligence::pricing::estimate_cost_usd("claude-sonnet-4", 1_000_000), 3.0);
+        let default_price = crate::intelligence::pricing::get_price("unknown-model");
+        assert_eq!(default_price.name, "default");
+
+        // P16.T10: print_usage and print_stats execution (no panic)
+        crate::analytics::print_stats(db_path)?;
+        crate::analytics::print_usage(db_path, None, false)?;
+        crate::analytics::print_usage(db_path, None, true)?;
+
+        let _ = std::fs::remove_file(db_path);
         Ok(())
     }
 }

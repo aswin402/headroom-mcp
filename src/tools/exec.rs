@@ -1,12 +1,13 @@
 use std::sync::atomic::Ordering;
 use crate::server::{HeadroomServer, mcp_error, log_info, COUNTER};
-use crate::compression::logs::compress_logs;
+use crate::compression::filter_command_output;
 use crate::intelligence::tokens::estimate_tokens;
 
 pub async fn run_and_compress(
     server: &HeadroomServer,
     command: String,
     args: Option<Vec<String>>,
+    model_hint: Option<String>,
 ) -> Result<String, rmcp::ErrorData> {
     log_info(&format!("run_and_compress: cmd={}", command));
 
@@ -50,8 +51,8 @@ pub async fn run_and_compress(
         ));
     }
 
-    // Compress using log compression
-    let compressed = compress_logs(trimmed, server.config.log_threshold);
+    // Compress using command-specific minifier
+    let compressed = filter_command_output(&command, trimmed, server.config.log_threshold);
 
     // Cache full raw output
     let time_ns = std::time::SystemTime::now()
@@ -61,6 +62,18 @@ pub async fn run_and_compress(
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
     server.cache.insert(&id, trimmed, None).map_err(mcp_error)?;
+
+    let original_tokens = estimate_tokens(trimmed);
+    let compressed_tokens = estimate_tokens(&compressed);
+    let _ = server.cache.log_compression(
+        "run_and_compress",
+        trimmed.len(),
+        compressed.len(),
+        original_tokens,
+        compressed_tokens,
+        "logs",
+        model_hint.as_deref(),
+    );
 
     // Update metrics
     server.metrics.compressions_total.fetch_add(1, Ordering::Relaxed);

@@ -50,6 +50,8 @@ pub struct CompressContentRequest {
     pub preview: Option<bool>,
     #[schemars(description = "If true, extracts only structural code signatures (functions/classes) and discards bodies.")]
     pub signatures_only: Option<bool>,
+    #[schemars(description = "Optional hint indicating the active AI model name (e.g. 'claude-sonnet-4').")]
+    pub model_hint: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -70,6 +72,8 @@ pub struct CompressFileRequest {
     pub preview: Option<bool>,
     #[schemars(description = "If true, extracts only structural code signatures (functions/classes) and discards bodies.")]
     pub signatures_only: Option<bool>,
+    #[schemars(description = "Optional hint indicating the active AI model name (e.g. 'claude-sonnet-4').")]
+    pub model_hint: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -130,6 +134,8 @@ pub struct CompressDirectoryRequest {
     pub preview: Option<bool>,
     #[schemars(description = "If true, extracts only structural code signatures (functions/classes) and discards bodies.")]
     pub signatures_only: Option<bool>,
+    #[schemars(description = "Optional hint indicating the active AI model name (e.g. 'claude-sonnet-4').")]
+    pub model_hint: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -150,6 +156,8 @@ pub struct RunAndCompressRequest {
     pub command: String,
     #[schemars(description = "Optional arguments to pass to the command.")]
     pub args: Option<Vec<String>>,
+    #[schemars(description = "Optional hint indicating the active AI model name (e.g. 'claude-sonnet-4').")]
+    pub model_hint: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -571,6 +579,10 @@ impl HeadroomServer {
             ));
         }
 
+        if self.config.enforce_yagni {
+            combined_content.push_str(crate::config::YAGNI_DIRECTIVES);
+        }
+
         Ok(combined_content)
     }
 
@@ -654,6 +666,15 @@ impl HeadroomServer {
                 compressed, original_tokens, compressed_tokens, saved_pct
             ))
         } else {
+            let _ = self.cache.log_compression(
+                "compress_content",
+                raw_text.len(),
+                compressed.len(),
+                original_tokens,
+                compressed_tokens,
+                &req.0.content_type,
+                req.0.model_hint.as_deref(),
+            );
             Ok(format!(
                 "{}\n\n[CCR Ref: {} | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call retrieve_original tool to inspect full content if needed]",
                 compressed, ccr_id, original_tokens, compressed_tokens, saved_pct
@@ -837,6 +858,15 @@ impl HeadroomServer {
                 compressed, original_tokens, compressed_tokens, saved_pct
             ))
         } else {
+            let _ = self.cache.log_compression(
+                "compress_file",
+                raw_text.len(),
+                compressed.len(),
+                original_tokens,
+                compressed_tokens,
+                "file",
+                req.0.model_hint.as_deref(),
+            );
             Ok(format!(
                 "{}\n\n[CCR Ref: {} | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call retrieve_original tool to inspect full content if needed]",
                 compressed, ccr_id, original_tokens, compressed_tokens, saved_pct
@@ -1209,6 +1239,18 @@ impl HeadroomServer {
                 self.cache
                     .insert(&id, raw_text.trim(), None)
                     .map_err(mcp_error)?;
+                
+                let original_tokens = estimate_tokens(&raw_text);
+                let compressed_tokens = estimate_tokens(&compressed);
+                let _ = self.cache.log_compression(
+                    "compress_directory",
+                    raw_text.len(),
+                    compressed.len(),
+                    original_tokens,
+                    compressed_tokens,
+                    content_type_ref,
+                    req.0.model_hint.as_deref(),
+                );
                 id
             };
 
@@ -1397,7 +1439,7 @@ impl HeadroomServer {
         &self,
         req: Parameters<RunAndCompressRequest>,
     ) -> Result<String, rmcp::ErrorData> {
-        crate::tools::exec::run_and_compress(self, req.0.command, req.0.args).await
+        crate::tools::exec::run_and_compress(self, req.0.command, req.0.args, req.0.model_hint).await
     }
 
     #[tool(
@@ -1477,6 +1519,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1495,6 +1538,7 @@ mod tests {
             max_depth: None,
             preview: Some(false),
             signatures_only: None,
+            model_hint: None,
         });
         let comp_res = server.compress_directory(req_comp).await.unwrap();
         assert!(comp_res.contains("Compressed directory"));
@@ -1524,6 +1568,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let metrics = Arc::new(crate::metrics::Metrics::new());
@@ -1539,6 +1584,7 @@ mod tests {
             threshold: None,
             preview: Some(false),
             signatures_only: None,
+            model_hint: None,
         });
         let compressed = server.compress_content(req).await.unwrap();
         assert!(compressed.contains("ccr_"));
@@ -1582,6 +1628,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1616,6 +1663,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1660,6 +1708,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1668,6 +1717,7 @@ mod tests {
         let req = Parameters(RunAndCompressRequest {
             command: "echo".to_string(),
             args: Some(vec!["hello headroom".to_string()]),
+            model_hint: None,
         });
 
         let result = server.run_and_compress(req).await.unwrap();
@@ -1689,6 +1739,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1714,6 +1765,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: false,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1736,6 +1788,7 @@ mod tests {
             threshold: None,
             preview: Some(true),
             signatures_only: Some(true),
+            model_hint: None,
         });
 
         let compressed = server.compress_content(req).await.unwrap();
@@ -1757,6 +1810,7 @@ mod tests {
             cache_ttl_hours: 0,
             metrics_interval: 0,
             compact_schemas: true,
+            enforce_yagni: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1769,5 +1823,73 @@ mod tests {
         // should be stripped when compact_schemas is true
         assert!(!schema_json.contains("The raw string content to compress"));
         assert!(!schema_json.contains("description"));
+    }
+
+    #[tokio::test]
+    async fn test_scope_context_yagni_enabled() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_yagni_enabled");
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("AGENTS.md"), "Keep it simple").unwrap();
+
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: Some(temp_dir.to_string_lossy().into_owned()),
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+            compact_schemas: false,
+            enforce_yagni: true,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        let req = Parameters(ScopeContextRequest {
+            target_path: "AGENTS.md".to_string(),
+        });
+        let result = server.scope_context(req).await.unwrap();
+        assert!(result.contains("YAGNI Minimalism Directives"));
+        assert!(result.contains("Keep it simple"));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scope_context_yagni_disabled() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_yagni_disabled");
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("AGENTS.md"), "Keep it simple").unwrap();
+
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: Some(temp_dir.to_string_lossy().into_owned()),
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+            compact_schemas: false,
+            enforce_yagni: false,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        let req = Parameters(ScopeContextRequest {
+            target_path: "AGENTS.md".to_string(),
+        });
+        let result = server.scope_context(req).await.unwrap();
+        assert!(!result.contains("YAGNI"));
+        assert!(result.contains("Keep it simple"));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_yagni_token_estimate() {
+        let token_count = crate::intelligence::tokens::estimate_tokens(crate::config::YAGNI_DIRECTIVES);
+        assert!(token_count < 400);
     }
 }

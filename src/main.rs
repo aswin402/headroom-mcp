@@ -6,6 +6,7 @@ mod intelligence;
 mod server;
 mod metrics;
 mod tools;
+mod analytics;
 
 use clap::Parser;
 use rmcp::{transport::stdio, ServiceExt};
@@ -18,6 +19,33 @@ use crate::server::HeadroomServer;
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let args = CliArgs::parse();
+
+    if let Some(ref command) = args.command {
+        match command {
+            cli::Commands::Stats { db_path } => {
+                let env_path = std::env::var("HEADROOM_DB_PATH").ok();
+                let path = db_path
+                    .as_deref()
+                    .or(args.db_path.as_deref())
+                    .or(env_path.as_deref())
+                    .unwrap_or("");
+                analytics::print_stats(path)?;
+                return Ok(());
+            }
+            cli::Commands::Usage { db_path, model, json } => {
+                let env_path = std::env::var("HEADROOM_DB_PATH").ok();
+                let path = db_path
+                    .as_deref()
+                    .or(args.db_path.as_deref())
+                    .or(env_path.as_deref())
+                    .unwrap_or("");
+                analytics::print_usage(path, model.as_deref(), *json)?;
+                return Ok(());
+            }
+            cli::Commands::Serve => {}
+        }
+    }
+
     let config = Arc::new(Config::from_cli(args));
     
     let cache: Arc<dyn cache::CacheBackend> = if let Some(ref db_path) = config.db_path {

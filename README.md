@@ -111,6 +111,37 @@ You can customize Headroom MCP via command-line arguments or environment variabl
 | `--cache-ttl-hours` | `HEADROOM_CACHE_TTL_HOURS` | `0` | Cache entry TTL in hours (0 = no expiry). |
 | `--metrics-interval` | `HEADROOM_METRICS_INTERVAL` | `0` | Periodic JSON metrics emission to stderr in seconds (0 = disabled). |
 | `--compact-schemas` | `HEADROOM_COMPACT_SCHEMAS` | `false` | Compact registered tool schemas by removing descriptions/metadata to save token budget. |
+| `--enforce-yagni` | `HEADROOM_ENFORCE_YAGNI` | `false` | Inject YAGNI minimalism directives into `scope_context` output. |
+
+---
+
+## Subcommands & Offline Analytics
+
+Headroom MCP provides subcommands to query your context savings and session statistics offline.
+
+### 1. `headroom-mcp stats`
+Displays cache entries, database sizes, compression counts, and overall saving ratios.
+```bash
+headroom-mcp stats --db-path /path/to/cache.db
+```
+
+### 2. `headroom-mcp usage`
+Exposes token savings, estimated dollar cost savings (using built-in pricing models for Claude, GPT, and Gemini), and compression percentages.
+```bash
+headroom-mcp usage --db-path /path/to/cache.db
+```
+*   Filter by model: `headroom-mcp usage --db-path /path/to/cache.db --model claude-sonnet-4`
+*   Output as JSON: `headroom-mcp usage --db-path /path/to/cache.db --json`
+
+---
+
+## Command-Specific Minifiers
+
+When using the `run_and_compress` tool to execute workspace commands (like cargo test, pytest, npm run build, etc.), Headroom MCP detects the command name and runs highly specialized semantic filters:
+*   **Cargo/Rust:** Drops compilation logs (`Compiling <crate>`), progress lines (`Downloading...`), and passing tests. Retains failed tests, panics, compiler error blocks, and summary stats.
+*   **Npm/Node:** Strips Jest/Vitest passing tests and generic warnings. Retains failing tests and full stack traces.
+*   **Git:** Filters out progress noise (e.g., `Enumerating objects...`) while keeping origin changes, ref updates, stats, and merge conflict markers.
+*   **Python:** Strips pip installation progress and pytest passing markers (`. [ 50%]`). Retains Python tracebacks, exceptions, and failed tests.
 
 ---
 

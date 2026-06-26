@@ -19,7 +19,27 @@ pub struct Config {
     pub cache_ttl_hours: u64,
     pub metrics_interval: u64,
     pub compact_schemas: bool,
+    pub enforce_yagni: bool,
 }
+
+pub const YAGNI_DIRECTIVES: &str = r#"
+---
+### Headroom: YAGNI Minimalism Directives
+
+Before writing ANY code, walk down this ladder and stop at the FIRST rung that applies:
+
+1. **Does this need to exist?** → If no: skip it entirely (YAGNI).
+2. **Already in this codebase?** → Reuse it. Do not rewrite.
+3. **Standard library does it?** → Use std. No external crate/package.
+4. **Native platform feature?** → Use it (e.g., `<input type="date">` over a date-picker library).
+5. **Already-installed dependency does it?** → Use what's there. Don't add a new dep.
+6. **Can it be one line?** → Write one line.
+7. **Only then:** Implement the minimum that works.
+
+**Never skip:** validation, error handling, security checks, accessibility.
+The code should be small because it is *necessary*, not golfed.
+---
+"#;
 
 impl Config {
     pub fn from_cli(args: CliArgs) -> Self {
@@ -33,6 +53,8 @@ impl Config {
             cache_ttl_hours: args.cache_ttl_hours,
             metrics_interval: args.metrics_interval,
             compact_schemas: args.compact_schemas,
+            enforce_yagni: args.enforce_yagni,
         }
     }
 }
+

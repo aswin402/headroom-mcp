@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-06-26
+
+### Added
+- **Command-Specific Output Minifiers:** Added specialized semantic filtering for `cargo`, `npm`, `git`, and `python` commands inside the `run_and_compress` tool. Strips progress indicators, compilation noise, passing test logs, and repository updates, reducing token tax by up to 90% while preserving failed tests, compiler errors, and merge conflicts.
+- **YAGNI Behavioral Injection (`--enforce-yagni`):** Added a minimalism coaching ladder directly to the `scope_context` tool output to proactively nudge AI coding agents against over-engineering.
+- **CLI Analytics Subcommands (`stats` & `usage`):** Added subcommands to inspect database size, compression ratios, cache items, token savings, and estimated USD cost reductions offline across all past agent sessions. Exposes static pricing metrics for Claude, GPT, and Gemini models.
+- **Persistent Compression Logging:** SQLite schema now records metadata (original/compressed bytes and tokens, content type, active model hint) for every tool compression to power analytics subcommands.
+
 ## [0.6.0] - 2026-06-26
 
 ### Added

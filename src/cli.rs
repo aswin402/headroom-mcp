@@ -1,9 +1,12 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// Headroom MCP — Context compression server for AI coding agents
 #[derive(Parser, Debug, Clone)]
 #[command(name = "headroom-mcp", version, about)]
 pub struct CliArgs {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     /// Log compression threshold in characters
     #[arg(long, env = "HEADROOM_LOG_THRESHOLD", default_value_t = 50_000)]
     pub log_threshold: usize,
@@ -39,4 +42,33 @@ pub struct CliArgs {
     /// Compact registered tool schemas by removing descriptions/metadata to save token budget
     #[arg(long, env = "HEADROOM_COMPACT_SCHEMAS")]
     pub compact_schemas: bool,
+
+    /// Inject YAGNI minimalism directives into scope_context output
+    #[arg(long, env = "HEADROOM_ENFORCE_YAGNI")]
+    pub enforce_yagni: bool,
 }
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Commands {
+    /// Start the MCP stdio server (default)
+    Serve,
+    /// Print compression statistics from the SQLite database
+    Stats {
+        /// SQLite database path to read from
+        #[arg(long, env = "HEADROOM_DB_PATH")]
+        db_path: Option<String>,
+    },
+    /// Print token savings and estimated cost reductions
+    Usage {
+        /// SQLite database path to read from
+        #[arg(long, env = "HEADROOM_DB_PATH")]
+        db_path: Option<String>,
+        /// Filter by model name
+        #[arg(long)]
+        model: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+

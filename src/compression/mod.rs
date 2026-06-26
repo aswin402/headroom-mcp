@@ -9,8 +9,11 @@ pub mod code;
 pub mod csv;
 pub mod logs;
 pub mod syntax;
+pub mod cmd_filters;
 
 // Re-export all public functions to preserve the public API.
+#[allow(unused_imports)]
+pub use cmd_filters::filter_command_output;
 #[allow(unused_imports)]
 pub use helpers::{safe_tail, safe_truncate};
 #[allow(unused_imports)]

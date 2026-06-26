@@ -39,6 +39,22 @@ impl SqliteCache {
             [],
         );
 
+        // Compression log table for analytics
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS compression_log (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp         TEXT NOT NULL DEFAULT (datetime('now')),
+                tool_name         TEXT NOT NULL,
+                original_bytes    INTEGER NOT NULL,
+                compressed_bytes  INTEGER NOT NULL,
+                original_tokens   INTEGER NOT NULL,
+                compressed_tokens INTEGER NOT NULL,
+                content_type      TEXT,
+                model_hint        TEXT
+            )",
+            [],
+        )?;
+
         Ok(Self {
             conn: Mutex::new(conn),
             max_bytes,
@@ -257,5 +273,126 @@ impl CacheBackend for SqliteCache {
             res.push(r?);
         }
         Ok(res)
+    }
+
+    fn log_compression(&self, tool: &str, orig_bytes: usize, comp_bytes: usize,
+                       orig_tokens: usize, comp_tokens: usize,
+                       content_type: &str, model_hint: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT INTO compression_log (tool_name, original_bytes, compressed_bytes, original_tokens, compressed_tokens, content_type, model_hint)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                tool,
+                orig_bytes as i64,
+                comp_bytes as i64,
+                orig_tokens as i64,
+                comp_tokens as i64,
+                content_type,
+                model_hint,
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompressionStats {
+    pub total_compressions: u64,
+    pub total_original_bytes: u64,
+    pub total_compressed_bytes: u64,
+    pub total_original_tokens: u64,
+    pub total_compressed_tokens: u64,
+    pub db_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageRow {
+    pub model: String,
+    pub total_original_tokens: u64,
+    pub total_saved_tokens: u64,
+    pub saving_pct: f64,
+    pub estimated_usd: f64,
+}
+
+impl SqliteCache {
+    pub fn query_stats(&self) -> Result<CompressionStats> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*), COALESCE(SUM(original_bytes), 0), COALESCE(SUM(compressed_bytes), 0), 
+                    COALESCE(SUM(original_tokens), 0), COALESCE(SUM(compressed_tokens), 0) 
+             FROM compression_log"
+        )?;
+        
+        let stats = stmt.query_row([], |row| {
+            Ok(CompressionStats {
+                total_compressions: row.get(0)?,
+                total_original_bytes: row.get::<_, i64>(1)? as u64,
+                total_compressed_bytes: row.get::<_, i64>(2)? as u64,
+                total_original_tokens: row.get::<_, i64>(3)? as u64,
+                total_compressed_tokens: row.get::<_, i64>(4)? as u64,
+                db_size_bytes: 0,
+            })
+        })?;
+
+        let db_size: i64 = conn.query_row(
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+            [],
+            |row| row.get(0)
+        ).unwrap_or(0);
+        
+        let mut stats = stats;
+        stats.db_size_bytes = db_size as u64;
+
+        Ok(stats)
+    }
+
+    pub fn query_usage(&self, model_filter: Option<&str>) -> Result<Vec<UsageRow>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        
+        let mut query = "SELECT COALESCE(NULLIF(model_hint, ''), 'default') as model, 
+                                SUM(original_tokens), 
+                                SUM(original_tokens - compressed_tokens) 
+                         FROM compression_log ".to_string();
+        
+        let mut params = Vec::new();
+        if let Some(filter) = model_filter {
+            query.push_str(" WHERE model_hint = ? ");
+            params.push(filter.to_string());
+        }
+        
+        query.push_str(" GROUP BY model ORDER BY SUM(original_tokens - compressed_tokens) DESC");
+        
+        let mut stmt = conn.prepare(&query)?;
+        
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let model: String = row.get(0)?;
+            let total_original_tokens: i64 = row.get(1)?;
+            let total_saved_tokens: i64 = row.get(2)?;
+            
+            let saving_pct = if total_original_tokens > 0 {
+                (total_saved_tokens as f64) / (total_original_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            
+            let estimated_usd = crate::intelligence::pricing::estimate_cost_usd(&model, total_saved_tokens as u64);
+            
+            Ok(UsageRow {
+                model,
+                total_original_tokens: total_original_tokens as u64,
+                total_saved_tokens: total_saved_tokens as u64,
+                saving_pct,
+                estimated_usd,
+            })
+        })?;
+        
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r?);
+        }
+        
+        Ok(result)
     }
 }
