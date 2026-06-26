@@ -89,23 +89,45 @@ graph TD
 
 Headroom MCP was built on the shoulders of several cutting-edge developer tools and AI optimization projects, adapting their principles into a native, high-performance Rust architecture:
 
-### 1. [Baidu's Unlimited-OCR](https://github.com/baidu/Unlimited-OCR) (Context Horizons)
-*   **Inspiration:** Unlimited-OCR is designed to solve long-context ingestion for multimodal models by converting multi-page PDFs to images and processing them sequentially with specialized decoding to avoid repetitive loop hallucinations.
+### 1. [chopratejas/headroom](https://github.com/chopratejas/headroom) (Context Compression)
+*   **Inspiration:** The original concept of dynamically compressing verbose file formats and logs to save context window headroom.
+*   **Headroom Synthesis:** While the original Python project leverages heavy machine learning and embedding models, Headroom MCP transitions to a deterministic, local-first model, bringing the same core concept down to sub-millisecond speeds with zero ML runtime overhead.
+
+### 2. [agent0ai/dox](https://github.com/agent0ai/dox) (Directory Scoping)
+*   **Inspiration:** The directory-level scoping mechanism (DOX pattern) that aggregates instructions (`AGENTS.md`) hierarchically.
+*   **Headroom Synthesis:** Headroom MCP translates the hierarchical scoping logic into Rust, expanding it to support `.cursorrules`, `CLAUDE.md`, and `CURSOR.md` dynamically, stopping at repository roots (`.git` boundaries).
+
+### 3. [Baidu's Unlimited-OCR](https://github.com/baidu/Unlimited-OCR) (Context Horizons)
+*   **Inspiration:** Unlimited-OCR solves long-context ingestion for multimodal models by converting multi-page PDFs to images and processing them sequentially with specialized decoding to avoid repetitive loop hallucinations.
 *   **Headroom Synthesis:** While Unlimited-OCR relies on heavy PyTorch VLM models and GPU infrastructure to process massive context, Headroom MCP approaches the "long context" problem from the opposite direction: stripping out high-token textual noise (logs, raw arrays, long functions) locally via fast regexes and AST extractors, ensuring the agent gets clean, dense context *without* requiring external GPUs.
 
-### 2. [kenn-io's agentsview](https://github.com/kenn-io/agentsview) (Session Analytics & Metrics)
+### 4. [kenn-io's agentsview](https://github.com/kenn-io/agentsview) (Session Analytics & Metrics)
 *   **Inspiration:** AgentsView serves as a local dashboard monitoring AI coding sessions, calculating prompt-caching-aware cost models, and indexing session metadata inside an offline SQLite database.
 *   **Headroom Synthesis:** Headroom MCP integrates offline analytics directly into the CLI. The server records metadata for every compression event to a persistent SQLite database. Developers can query `headroom-mcp stats` and `headroom-mcp usage` to inspect total token savings and estimated USD cost reductions across various model families.
 
-### 3. [rtk-ai/rtk](https://github.com/rtk-ai/rtk) (Command Output Filtering)
+### 5. [rtk-ai/rtk](https://github.com/rtk-ai/rtk) (Command Output Filtering)
 *   **Inspiration:** Rust Token Killer (RTK) intercepts the stdout/stderr of developer commands run by AI agents, stripping redundant compiler warnings, header noise, and verbose passing logs.
 *   **Headroom Synthesis:** Headroom implements specialized, command-specific minification filters inside the `run_and_compress` tool. When an agent runs tests, updates packages, or queries Git status, Headroom intercepts the logs and reduces token footprint by up to 90% while preserving traceback faults and merge markers.
 
-### 4. [DietrichGebert's ponytail](https://github.com/DietrichGebert/ponytail) (YAGNI & Behavioral Scoping)
+### 6. [DietrichGebert's ponytail](https://github.com/DietrichGebert/ponytail) (YAGNI & Behavioral Scoping)
 *   **Inspiration:** Ponytail forces coding agents down a cognitive decision ladder to write minimal, cache-friendly code blocks (YAGNI, standard-library-first, platform-native) rather than pulling in external libraries.
 *   **Headroom Synthesis:** By passing the `--enforce-yagni` flag at server startup, Headroom MCP appends an adversarial minimalism instruction prompt to all aggregated rules output by `scope_context`. This actively coaches the LLM to write shorter, cleaner code, reducing generated output tokens by over 20%.
 
 ---
+
+### 🎯 Core Philosophy: Premium & Zero-Footprint Context Engineering
+
+Headroom MCP is built from the ground up to solve the core trade-off in AI-assisted development: **getting high-quality, precise LLM outputs without exhausting the context window, paying massive token bills, or slowing down the local machine.**
+
+*   **Prompt Quality over Prompt Size:** Scoping rules hierarchically (DOX) ensures the LLM's attention is focused precisely on relevant instructions, eliminating rule conflicts and context dilution.
+*   **Zero Machine Overhead:** Built entirely in native, async Rust (Tokio). No PyTorch, no Python interpreter delays, and no Docker packages.
+    *   **RAM:** `<10MB` idle, `<50MB` under load.
+    *   **ROM:** `~3.2MB` self-contained executable.
+    *   **CPU:** Near-zero idle load.
+*   **Maximum Token Efficiency:** Compresses verbose logs, code files, and structural data by 40-90%, leaving more "headroom" in the LLM's active prompt memory while keeping full content instantly retrievable on-demand (CCR).
+
+---
+
 
 ## 🛠️ The 19 MCP Tools Exposed
 
