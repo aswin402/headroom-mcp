@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-06-26
+
+### Added
+- **Diff Compression Tool:** New `compress_diff` tool parses unified diffs to count insertions, deletions, modified hunks, and context functions/headers.
+- **Directory walking & Codebase Overview:** 
+  - `compress_directory`: Recursively walks directories respecting `.gitignore`, filters by extension, skips binary files, and registers individual file compression cache entries.
+  - `summarize_codebase`: Automatically detects project types, counts files/lines, and formats a clean ASCII folder tree structure.
+- **Metrics & Observability:** Cumulative metrics tracking for total compressions, cache hits, misses, bytes compressed, saved, and total retrievals. Added a background metrics reporting thread printing JSON to stderr if `--metrics-interval` is enabled.
+- **Unit and Integration Tests:** Added 4 new tests for diff parsing and formatting, plus integration tests for directory walkthroughs, project type detection, and metrics tracking.
+
+### Changed
+- **Compression Module Split:** Refactored monolithic `compression/mod.rs` into 6 submodules: `json.rs`, `code.rs`, `logs.rs`, `csv.rs`, `detect.rs`, and `helpers.rs` for easier maintenance.
+
+## [0.3.0] - 2026-06-26
+
+### Added
+- **CLI & Env Variable Config:** Added command line arguments and environment variable overrides via `clap` (e.g. `--db-path`, `--log-threshold`, `--workspace-root`).
+- **Token Intelligence:** Added `count_tokens` tool and integrated token estimation metrics (original vs compressed tokens and savings ratio) directly into CCR responses.
+- **SQLite Cache Persistence:** SQLite-backed cache manager with automatic schema creation, session tags, TTL, and FTS5 full-text search indexing.
+- **Importance-Based Log Scoring:** Replaced simple head/tail truncation with an importance-based scoring engine for log lines, prioritizing warning/error lines and context.
+- **Cache Management Tools:** `search_cache` (keyword search on cached content), `export_cache` (dump cache to workspace JSON file), and `import_cache` (restore entries from JSON).
+- **Compression Previews:** Added `preview` flag on compression requests to bypass caching and return only token ratios.
+
 ## [0.2.0] - 2026-06-26
 
 ### Added

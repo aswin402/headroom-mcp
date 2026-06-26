@@ -6,6 +6,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 }
 
 /// More precise estimate using whitespace + special char splitting
+#[allow(dead_code)]
 pub fn estimate_tokens_precise(text: &str) -> usize {
     let mut count = 0;
     let mut in_word = false;

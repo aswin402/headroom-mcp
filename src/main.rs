@@ -4,6 +4,7 @@ mod compression;
 mod config;
 mod intelligence;
 mod server;
+mod metrics;
 
 use clap::Parser;
 use rmcp::{transport::stdio, ServiceExt};
@@ -30,7 +31,24 @@ async fn main() -> Result<(), anyhow::Error> {
         Arc::new(cache::memory::MemoryCache::new(config.max_cache_bytes))
     };
 
-    let server = HeadroomServer::new(config, cache);
+    let metrics = Arc::new(metrics::Metrics::new());
+
+    if config.metrics_interval > 0 {
+        let metrics_cloned = metrics.clone();
+        let interval_secs = config.metrics_interval;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            // First tick finishes immediately, so we should tick once before entering the loop
+            // to avoid printing immediately on startup (or we can just let it print if we want).
+            // Let's print periodically:
+            loop {
+                interval.tick().await;
+                eprintln!("[Headroom MCP] [METRICS] {}", metrics_cloned.to_json());
+            }
+        });
+    }
+
+    let server = HeadroomServer::new(config, cache, metrics);
 
     // Start the stdio transport server
     let service = server.serve(stdio()).await?;

@@ -31,4 +31,8 @@ pub struct CliArgs {
     /// Cache entry TTL in hours (0 = no expiry)
     #[arg(long, env = "HEADROOM_CACHE_TTL_HOURS", default_value_t = 0)]
     pub cache_ttl_hours: u64,
+
+    /// Metrics reporting interval in seconds (0 = disabled)
+    #[arg(long, env = "HEADROOM_METRICS_INTERVAL", default_value_t = 0)]
+    pub metrics_interval: u64,
 }

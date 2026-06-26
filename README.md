@@ -46,17 +46,20 @@ graph TD
         T2[compress_content]
         T3[retrieve_original]
         T4[compress_file]
-        T5[cache_stats]
-        T6[clear_cache]
-        T7[server_info]
+        T5[compress_diff]
+        T6[compress_directory]
+        T7[summarize_codebase]
+        T8[search_cache]
+        T9[export_cache / import_cache]
+        T10[cache_stats / clear_cache / server_info / ping / count_tokens]
     end
     
-    Server --> T1 & T2 & T3 & T4 & T5 & T6 & T7
+    Server --> T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10
     
-    T1 -->|Tree Walk| FS[(Local Filesystem - AGENTS.md, etc.)]
-    T4 -->|Read & auto-detect| FS
-    T2 & T4 -->|Compression Engines| Comp[Minification Engines]
-    T2 & T4 -->|Save Raw Text| Cache[(LRU Cache - max 100MB)]
+    T1 & T7 -->|Tree Walk| FS[(Local Filesystem)]
+    T4 & T6 -->|Read & auto-detect| FS
+    T2 & T4 & T5 & T6 -->|Compression Engines| Comp[Minification Engines]
+    T2 & T4 & T5 & T6 -->|Save Raw Text| Cache[(Hybrid Cache: Memory / SQLite)]
     T3 -->|Fetch Raw Text| Cache
 ```
 
@@ -76,12 +79,37 @@ graph TD
 | Tool | Parameters | Description |
 | :--- | :--- | :--- |
 | `scope_context` | `target_path` | Walks directory hierarchy to aggregate rules files (AGENTS.md, CLAUDE.md, etc.). |
-| `compress_content` | `raw_text`, `content_type`, `threshold` (optional) | Compresses raw text dynamically and caches the original content. |
+| `compress_content` | `raw_text`, `content_type`, `threshold` (optional), `preview` (optional) | Compresses raw text dynamically and caches the original content. |
 | `retrieve_original` | `ccr_id` | Retrieves original uncompressed content or reads a workspace file. |
-| `compress_file` | `file_path`, `content_type` (optional), `threshold` (optional) | Reads a file from workspace, compresses, caches, and returns CCR reference. |
+| `compress_file` | `file_path`, `content_type` (optional), `threshold` (optional), `preview` (optional) | Reads a file from workspace, compresses, caches, and returns CCR reference. |
+| `compress_diff` | `diff_text`, `preview` (optional) | Parses unified diffs, counts insertions/deletions/hunks, and formats a summary. |
+| `compress_directory` | `dir_path`, `extensions` (optional), `max_depth` (optional), `preview` (optional) | Walks a directory recursively, compressing and caching each text file. |
+| `summarize_codebase` | `root_path` (optional) | Analyzes codebase type, files, line counts, and outputs a formatted folder structure tree. |
+| `search_cache` | `query`, `max_results` (optional) | Searches cached entries by keyword using FTS5 SQLite index or substring matching. |
+| `export_cache` | `file_path` | Dumps the entire cache to a portable JSON file inside the workspace. |
+| `import_cache` | `file_path` | Restores cache entries from a previously exported JSON file. |
 | `cache_stats` | None | Returns cache item count, total bytes, and active CCR IDs. |
-| `clear_cache` | None | Empties the LRU cache to release memory. |
-| `server_info` | None | Returns version, uptime, cache usage, and defaults configurations. |
+| `clear_cache` | None | Empties the cache to release memory. |
+| `server_info` | None | Returns version, uptime, cache usage, cumulative metrics, and configuration. |
+| `ping` | None | Health check. Returns `"ok"`. |
+| `count_tokens` | `text` | Estimates the token count for a given text. |
+
+---
+
+## Configuration & CLI Flags
+
+You can customize Headroom MCP via command-line arguments or environment variables:
+
+| CLI Argument | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--log-threshold` | `HEADROOM_LOG_THRESHOLD` | `50000` | Log compression threshold in characters. |
+| `--json-threshold` | `HEADROOM_JSON_THRESHOLD` | `10000` | JSON compression threshold in characters. |
+| `--max-input-size` | `HEADROOM_MAX_INPUT` | `10MB` | Maximum allowed input size in bytes. |
+| `--max-cache-bytes` | `HEADROOM_MAX_CACHE_MB` | `100MB` | Maximum cache size in bytes before LRU eviction. |
+| `--workspace-root` | `HEADROOM_WORKSPACE` | Current dir | Active workspace root directory (sandboxing root). |
+| `--db-path` | `HEADROOM_DB_PATH` | None | SQLite database path for persistent cache (activates SQLite backend). |
+| `--cache-ttl-hours` | `HEADROOM_CACHE_TTL_HOURS` | `0` | Cache entry TTL in hours (0 = no expiry). |
+| `--metrics-interval` | `HEADROOM_METRICS_INTERVAL` | `0` | Periodic JSON metrics emission to stderr in seconds (0 = disabled). |
 
 ---
 

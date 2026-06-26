@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::cli::CliArgs;
 
 pub const DEFAULT_LOG_THRESHOLD: usize = 50_000;
@@ -15,6 +17,7 @@ pub struct Config {
     pub workspace_root: Option<String>,
     pub db_path: Option<String>,
     pub cache_ttl_hours: u64,
+    pub metrics_interval: u64,
 }
 
 impl Config {
@@ -27,6 +30,7 @@ impl Config {
             workspace_root: args.workspace_root,
             db_path: args.db_path,
             cache_ttl_hours: args.cache_ttl_hours,
+            metrics_interval: args.metrics_interval,
         }
     }
 }

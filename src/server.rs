@@ -3,6 +3,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::schemars::JsonSchema;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +15,7 @@ use crate::compression::{
     auto_detect_content_type, compress_code, compress_csv, compress_json, compress_logs,
     detect_content_type_from_ext,
 };
+use crate::compression::diff::compress_diff;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -23,6 +25,7 @@ pub struct HeadroomServer {
     tool_router: ToolRouter<Self>,
     pub config: Arc<Config>,
     pub cache: Arc<dyn crate::cache::CacheBackend>,
+    pub metrics: Arc<crate::metrics::Metrics>,
     pub start_time: Instant,
 }
 
@@ -103,6 +106,32 @@ pub struct ImportCacheRequest {
     pub file_path: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct CompressDiffRequest {
+    #[schemars(description = "Raw unified diff output to compress.")]
+    pub diff_text: String,
+    #[schemars(description = "If true, returns a preview of compression without caching.")]
+    pub preview: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CompressDirectoryRequest {
+    #[schemars(description = "Path to the directory to compress.")]
+    pub dir_path: String,
+    #[schemars(description = "File extensions to include (e.g. ['rs', 'py']). Empty = all.")]
+    pub extensions: Option<Vec<String>>,
+    #[schemars(description = "Maximum depth to recurse (0 = unlimited).")]
+    pub max_depth: Option<usize>,
+    #[schemars(description = "If true, returns a preview of compression without caching.")]
+    pub preview: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SummarizeCodebaseRequest {
+    #[schemars(description = "Root path of the codebase (default: workspace root).")]
+    pub root_path: Option<String>,
+}
+
 fn mcp_error<E: std::fmt::Display>(err: E) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
 }
@@ -115,13 +144,238 @@ fn log_error(msg: &str) {
     eprintln!("[Headroom MCP] [ERROR] {}", msg);
 }
 
+// --- Helper Structs for Directory & Codebase Tools ---
+
+struct TreeNode {
+    name: String,
+    is_dir: bool,
+    line_count: usize,
+    files_count: usize,
+    children: BTreeMap<String, TreeNode>,
+}
+
+impl TreeNode {
+    fn insert(&mut self, parts: &[String], is_file: bool, line_count: usize) {
+        if parts.is_empty() {
+            return;
+        }
+        let name = &parts[0];
+        if parts.len() == 1 {
+            let child = TreeNode {
+                name: name.clone(),
+                is_dir: !is_file,
+                line_count,
+                files_count: if is_file { 1 } else { 0 },
+                children: BTreeMap::new(),
+            };
+            self.children.insert(name.clone(), child);
+        } else {
+            let entry = self.children.entry(name.clone()).or_insert_with(|| TreeNode {
+                name: name.clone(),
+                is_dir: true,
+                line_count: 0,
+                files_count: 0,
+                children: BTreeMap::new(),
+            });
+            entry.insert(&parts[1..], is_file, line_count);
+        }
+    }
+
+    fn update_counts(&mut self) -> (usize, usize) {
+        if !self.is_dir {
+            return (self.files_count, self.line_count);
+        }
+        let mut total_files = 0;
+        let mut total_lines = 0;
+        for child in self.children.values_mut() {
+            let (f, l) = child.update_counts();
+            total_files += f;
+            total_lines += l;
+        }
+        self.files_count = total_files;
+        self.line_count = total_lines;
+        (total_files, total_lines)
+    }
+
+    fn format_tree(&self, prefix: &str, is_last: bool, depth: usize, max_depth: usize) -> String {
+        if depth > max_depth {
+            return "".to_string();
+        }
+        let mut result = String::new();
+        if depth > 0 {
+            let connector = if is_last { "└── " } else { "├── " };
+            result.push_str(prefix);
+            result.push_str(connector);
+            if self.is_dir {
+                result.push_str(&format!("{}/ ({} file{}, {} lines)\n", self.name, self.files_count, if self.files_count == 1 { "" } else { "s" }, self.line_count));
+            } else {
+                result.push_str(&format!("{} ({} lines)\n", self.name, self.line_count));
+            }
+        }
+
+        if self.is_dir && depth < max_depth {
+            let new_prefix = if depth == 0 {
+                "".to_string()
+            } else {
+                format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+            };
+            let children_vec: Vec<&TreeNode> = self.children.values().collect();
+            for (i, child) in children_vec.iter().enumerate() {
+                let last_child = i == children_vec.len() - 1;
+                result.push_str(&child.format_tree(&new_prefix, last_child, depth + 1, max_depth));
+            }
+        }
+        result
+    }
+}
+
+struct CompTreeFile {
+    ccr_id: String,
+    original_tokens: usize,
+    compressed_tokens: usize,
+    saved_pct: String,
+}
+
+struct CompTreeNode {
+    name: String,
+    is_dir: bool,
+    files_count: usize,
+    file_info: Option<CompTreeFile>,
+    children: BTreeMap<String, CompTreeNode>,
+}
+
+impl CompTreeNode {
+    fn insert(&mut self, parts: &[String], file_info: CompTreeFile) {
+        if parts.is_empty() {
+            return;
+        }
+        let name = &parts[0];
+        if parts.len() == 1 {
+            let child = CompTreeNode {
+                name: name.clone(),
+                is_dir: false,
+                files_count: 1,
+                file_info: Some(file_info),
+                children: BTreeMap::new(),
+            };
+            self.children.insert(name.clone(), child);
+        } else {
+            let entry = self.children.entry(name.clone()).or_insert_with(|| CompTreeNode {
+                name: name.clone(),
+                is_dir: true,
+                files_count: 0,
+                file_info: None,
+                children: BTreeMap::new(),
+            });
+            entry.insert(&parts[1..], file_info);
+        }
+    }
+
+    fn update_counts(&mut self) -> usize {
+        if !self.is_dir {
+            return 1;
+        }
+        let mut total = 0;
+        for child in self.children.values_mut() {
+            total += child.update_counts();
+        }
+        self.files_count = total;
+        total
+    }
+
+    fn format_tree(&self, prefix: &str, is_last: bool, depth: usize, max_depth: usize) -> String {
+        if depth > max_depth {
+            return "".to_string();
+        }
+        let mut result = String::new();
+        if depth > 0 {
+            let connector = if is_last { "└── " } else { "├── " };
+            result.push_str(prefix);
+            result.push_str(connector);
+            if self.is_dir {
+                result.push_str(&format!("{}/ ({} file{} compressed)\n", self.name, self.files_count, if self.files_count == 1 { "" } else { "s" }));
+            } else if let Some(ref info) = self.file_info {
+                result.push_str(&format!(
+                    "{} [CCR: {} | ~{} -> ~{} tokens | saved {}]\n",
+                    self.name, info.ccr_id, info.original_tokens, info.compressed_tokens, info.saved_pct
+                ));
+            } else {
+                result.push_str(&format!("{}\n", self.name));
+            }
+        }
+
+        if self.is_dir && depth < max_depth {
+            let new_prefix = if depth == 0 {
+                "".to_string()
+            } else {
+                format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+            };
+            let children_vec: Vec<&CompTreeNode> = self.children.values().collect();
+            for (i, child) in children_vec.iter().enumerate() {
+                let last_child = i == children_vec.len() - 1;
+                result.push_str(&child.format_tree(&new_prefix, last_child, depth + 1, max_depth));
+            }
+        }
+        result
+    }
+}
+
+fn is_binary_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        match ext.to_lowercase().as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" |
+            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" |
+            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
+            "exe" | "dll" | "so" | "dylib" | "bin" | "node" |
+            "mp3" | "mp4" | "wav" | "avi" | "mkv" | "mov" => return true,
+            _ => {}
+        }
+    }
+    if let Ok(mut file) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buffer = [0; 1024];
+        if let Ok(bytes_read) = file.read(&mut buffer) {
+            if buffer[..bytes_read].contains(&0) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn detect_project_type(root: &Path) -> String {
+    if root.join("Cargo.toml").exists() {
+        "Rust".to_string()
+    } else if root.join("package.json").exists() {
+        "Node.js".to_string()
+    } else if root.join("go.mod").exists() {
+        "Go".to_string()
+    } else if root.join("requirements.txt").exists()
+        || root.join("pyproject.toml").exists()
+        || root.join("Pipfile").exists()
+    {
+        "Python".to_string()
+    } else if root.join("pom.xml").exists() || root.join("build.gradle").exists() {
+        "Java".to_string()
+    } else if root.join("CMakeLists.txt").exists() {
+        "C/C++".to_string()
+    } else {
+        "Generic/Unknown".to_string()
+    }
+}
+
 #[tool_router(server_handler)]
 impl HeadroomServer {
-    pub fn new(config: Arc<Config>, cache: Arc<dyn crate::cache::CacheBackend>) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        cache: Arc<dyn crate::cache::CacheBackend>,
+        metrics: Arc<crate::metrics::Metrics>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             config,
             cache,
+            metrics,
             start_time: Instant::now(),
         }
     }
@@ -140,6 +394,36 @@ impl HeadroomServer {
                 .canonicalize()
                 .map_err(mcp_error)
         }
+    }
+
+    fn resolve_and_verify_path(&self, input_path: &str) -> Result<std::path::PathBuf, rmcp::ErrorData> {
+        let workspace_root = self.get_workspace_root()?;
+        let path = Path::new(input_path.trim_start_matches("file://"));
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_root.join(path)
+        };
+
+        let resolved_path = match absolute_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!("Path '{}' does not exist or cannot be accessed: {}", input_path, e),
+                    None,
+                ));
+            }
+        };
+
+        if !resolved_path.starts_with(&workspace_root) {
+            log_error(&format!("Access denied for path: {}", input_path));
+            return Err(rmcp::ErrorData::internal_error(
+                format!("Access denied: path '{}' is outside workspace root", input_path),
+                None,
+            ));
+        }
+
+        Ok(resolved_path)
     }
 
     #[tool(
@@ -268,6 +552,10 @@ impl HeadroomServer {
             _ => compress_logs(raw_text, threshold.unwrap_or(self.config.log_threshold)),
         };
 
+        self.metrics.compressions_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.total_bytes_compressed.fetch_add(raw_text.len() as u64, Ordering::Relaxed);
+        self.metrics.total_bytes_saved.fetch_add(raw_text.len().saturating_sub(compressed.len()) as u64, Ordering::Relaxed);
+
         let is_preview = req.0.preview.unwrap_or(false);
         let ccr_id = if is_preview {
             "PREVIEW".to_string()
@@ -315,6 +603,8 @@ impl HeadroomServer {
         let input = req.0.ccr_id.trim();
         log_info(&format!("retrieve_original: {}", input));
 
+        self.metrics.retrievals_total.fetch_add(1, Ordering::Relaxed);
+
         if input.starts_with("file://")
             || input.starts_with('/')
             || input.contains('/')
@@ -356,11 +646,17 @@ impl HeadroomServer {
         } else {
             // Retrieve from cache and update last_accessed time
             match self.cache.get(input).map_err(mcp_error)? {
-                Some(content) => Ok(content),
-                None => Err(rmcp::ErrorData::internal_error(
-                    format!("CCR reference ID '{}' not found or expired.", input),
-                    None,
-                ))
+                Some(content) => {
+                    self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    Ok(content)
+                }
+                None => {
+                    self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+                    Err(rmcp::ErrorData::internal_error(
+                        format!("CCR reference ID '{}' not found or expired.", input),
+                        None,
+                    ))
+                }
             }
         }
     }
@@ -434,6 +730,10 @@ impl HeadroomServer {
             "csv" => compress_csv(&raw_text),
             _ => compress_logs(&raw_text, threshold.unwrap_or(self.config.log_threshold)),
         };
+
+        self.metrics.compressions_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.total_bytes_compressed.fetch_add(raw_text.len() as u64, Ordering::Relaxed);
+        self.metrics.total_bytes_saved.fetch_add(raw_text.len().saturating_sub(compressed.len()) as u64, Ordering::Relaxed);
 
         let is_preview = req.0.preview.unwrap_or(false);
         let ccr_id = if is_preview {
@@ -521,6 +821,7 @@ impl HeadroomServer {
         let uptime_secs = self.start_time.elapsed().as_secs();
         let count = self.cache.len().map_err(mcp_error)?;
         
+        let metrics_json = self.metrics.to_json();
         Ok(format!(
             "Headroom MCP Server Info:\n\
              - Version: {}\n\
@@ -530,7 +831,8 @@ impl HeadroomServer {
              - Default JSON Threshold: {} chars\n\
              - Max Input Size: {} bytes\n\
              - Max Cache Size: {} bytes\n\
-             - Workspace Root: {:?}",
+             - Workspace Root: {:?}\n\
+             - Metrics: {}",
             env!("CARGO_PKG_VERSION"),
             uptime_secs,
             count,
@@ -538,7 +840,8 @@ impl HeadroomServer {
             self.config.json_threshold,
             self.config.max_input_size,
             self.config.max_cache_bytes,
-            self.config.workspace_root
+            self.config.workspace_root,
+            metrics_json
         ))
     }
 
@@ -657,5 +960,493 @@ impl HeadroomServer {
         }
 
         Ok(format!("Successfully imported {} cache entries from '{}'.", count, path_str))
+    }
+
+    #[tool(
+        description = "Compresses unified diff output into a structural summary and caches the full diff."
+    )]
+    async fn compress_diff(
+        &self,
+        req: Parameters<CompressDiffRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let diff_text = req.0.diff_text.trim();
+        if diff_text.is_empty() {
+            return Ok("Empty diff provided.".to_string());
+        }
+
+        // Max input size check
+        if diff_text.len() > self.config.max_input_size {
+            return Err(rmcp::ErrorData::internal_error(
+                format!("Diff size exceeds maximum allowed size of {} bytes", self.config.max_input_size),
+                None,
+            ));
+        }
+
+        log_info("compress_diff");
+
+        let compressed = compress_diff(diff_text);
+        self.metrics.compressions_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.total_bytes_compressed.fetch_add(diff_text.len() as u64, Ordering::Relaxed);
+        self.metrics.total_bytes_saved.fetch_add(diff_text.len().saturating_sub(compressed.len()) as u64, Ordering::Relaxed);
+        let is_preview = req.0.preview.unwrap_or(false);
+
+        let ccr_id = if is_preview {
+            "PREVIEW".to_string()
+        } else {
+            let time_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
+            self.cache.insert(&id, diff_text, None).map_err(mcp_error)?;
+            id
+        };
+
+        let original_tokens = estimate_tokens(diff_text);
+        let compressed_tokens = estimate_tokens(&compressed);
+        let saved_pct = if original_tokens > 0 {
+            let saved = (original_tokens as f64 - compressed_tokens as f64) / original_tokens as f64 * 100.0;
+            format!("{:.1}%", saved.max(0.0))
+        } else {
+            "0.0%".to_string()
+        };
+
+        if is_preview {
+            Ok(format!(
+                "{}\n\n[PREVIEW - not cached | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call again with preview=false to register CCR]",
+                compressed, original_tokens, compressed_tokens, saved_pct
+            ))
+        } else {
+            Ok(format!(
+                "{}\n\n[CCR Ref: {} | Original: ~{} tokens | Compressed: ~{} tokens | Saved: {} | call retrieve_original tool to inspect full content if needed]",
+                compressed, ccr_id, original_tokens, compressed_tokens, saved_pct
+            ))
+        }
+    }
+
+    #[tool(
+        description = "Recursively walks a directory, compresses each matching file, and registers CCR reference tokens for the agent."
+    )]
+    async fn compress_directory(
+        &self,
+        req: Parameters<CompressDirectoryRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let dir_path_str = &req.0.dir_path;
+        log_info(&format!("compress_directory: {}", dir_path_str));
+
+        let resolved_dir = self.resolve_and_verify_path(dir_path_str)?;
+
+        let mut walk_builder = ignore::WalkBuilder::new(&resolved_dir);
+        walk_builder.git_ignore(true);
+        walk_builder.hidden(false); // include hidden, but skip .git component manually
+        
+        if let Some(depth) = req.0.max_depth {
+            if depth > 0 {
+                walk_builder.max_depth(Some(depth));
+            }
+        }
+
+        let walker = walk_builder.build();
+        let mut processed_files = 0;
+        let file_limit = 500;
+        let mut tree_root = CompTreeNode {
+            name: resolved_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(".")
+                .to_string(),
+            is_dir: true,
+            files_count: 0,
+            file_info: None,
+            children: BTreeMap::new(),
+        };
+
+        let extensions = req.0.extensions.clone().unwrap_or_default();
+        let is_preview = req.0.preview.unwrap_or(false);
+
+        for result in walker {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+
+            if path.components().any(|c| c.as_os_str() == ".git") {
+                continue;
+            }
+
+            if !extensions.is_empty() {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if !extensions.iter().any(|filter| filter.to_lowercase() == ext) {
+                    continue;
+                }
+            }
+
+            if is_binary_file(path) {
+                continue;
+            }
+
+            let raw_text = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+
+            if raw_text.len() > self.config.max_input_size {
+                continue;
+            }
+
+            let content_type_ref = detect_content_type_from_ext(path)
+                .unwrap_or_else(|| auto_detect_content_type(&raw_text));
+
+            let compressed = match content_type_ref {
+                "json" => match compress_json(&raw_text, self.config.json_threshold) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                },
+                "code" | "yaml" | "markdown" => compress_code(&raw_text),
+                "csv" => compress_csv(&raw_text),
+                _ => compress_logs(&raw_text, self.config.log_threshold),
+            };
+
+            self.metrics.compressions_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics.total_bytes_compressed.fetch_add(raw_text.len() as u64, Ordering::Relaxed);
+            self.metrics.total_bytes_saved.fetch_add(raw_text.len().saturating_sub(compressed.len()) as u64, Ordering::Relaxed);
+
+            let ccr_id = if is_preview {
+                "PREVIEW".to_string()
+            } else {
+                let time_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let id = format!("ccr_{:x}_{:x}", time_ns & 0xFFFFFFFF, seq);
+                self.cache
+                    .insert(&id, raw_text.trim(), None)
+                    .map_err(mcp_error)?;
+                id
+            };
+
+            let original_tokens = estimate_tokens(&raw_text);
+            let compressed_tokens = estimate_tokens(&compressed);
+            let saved_pct = if original_tokens > 0 {
+                let saved = (original_tokens as f64 - compressed_tokens as f64) / original_tokens as f64 * 100.0;
+                format!("{:.1}%", saved.max(0.0))
+            } else {
+                "0.0%".to_string()
+            };
+
+            if let Ok(rel_path) = path.strip_prefix(&resolved_dir) {
+                let parts: Vec<String> = rel_path
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+
+                let file_info = CompTreeFile {
+                    ccr_id,
+                    original_tokens,
+                    compressed_tokens,
+                    saved_pct,
+                };
+
+                tree_root.insert(&parts, file_info);
+            }
+
+            processed_files += 1;
+            if processed_files >= file_limit {
+                break;
+            }
+        }
+
+        tree_root.update_counts();
+        let max_depth = req.0.max_depth.unwrap_or(4);
+        let tree_str = tree_root.format_tree("", true, 0, max_depth);
+
+        let preview_label = if is_preview {
+            " [PREVIEW - not cached]"
+        } else {
+            ""
+        };
+
+        let suffix = if processed_files >= file_limit {
+            format!("\nWarning: Walk stopped early because file count limit ({}) was reached.", file_limit)
+        } else {
+            "".to_string()
+        };
+
+        Ok(format!(
+            "Compressed directory: {} ({} files processed){}\n\n{}{}",
+            dir_path_str, processed_files, preview_label, tree_str, suffix
+        ))
+    }
+
+    #[tool(
+        description = "Analyzes the codebase and returns a summary of language usage, file sizes, and directory layout."
+    )]
+    async fn summarize_codebase(
+        &self,
+        req: Parameters<SummarizeCodebaseRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let root_path_str = req.0.root_path.as_deref().unwrap_or(".");
+        log_info(&format!("summarize_codebase: {}", root_path_str));
+
+        let resolved_root = self.resolve_and_verify_path(root_path_str)?;
+
+        let mut walk_builder = ignore::WalkBuilder::new(&resolved_root);
+        walk_builder.git_ignore(true);
+        walk_builder.hidden(false);
+
+        let walker = walk_builder.build();
+        let mut total_files = 0;
+        let mut total_lines = 0;
+        let mut ext_counts: HashMap<String, (usize, usize)> = HashMap::new();
+
+        let mut tree_root = TreeNode {
+            name: resolved_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(".")
+                .to_string(),
+            is_dir: true,
+            line_count: 0,
+            files_count: 0,
+            children: BTreeMap::new(),
+        };
+
+        let file_limit = 1000;
+
+        for result in walker {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+
+            if path.components().any(|c| c.as_os_str() == ".git") {
+                continue;
+            }
+
+            if is_binary_file(path) {
+                continue;
+            }
+
+            let file_lines = if let Ok(content) = fs::read_to_string(path) {
+                content.lines().count()
+            } else {
+                continue;
+            };
+
+            total_files += 1;
+            total_lines += file_lines;
+
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("no_ext")
+                .to_lowercase();
+            let entry_stats = ext_counts.entry(ext).or_insert((0, 0));
+            entry_stats.0 += 1;
+            entry_stats.1 += file_lines;
+
+            if let Ok(rel_path) = path.strip_prefix(&resolved_root) {
+                let parts: Vec<String> = rel_path
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                tree_root.insert(&parts, true, file_lines);
+            }
+
+            if total_files >= file_limit {
+                break;
+            }
+        }
+
+        tree_root.update_counts();
+        let tree_str = tree_root.format_tree("", true, 0, 3);
+        let project_type = detect_project_type(&resolved_root);
+
+        let mut breakdown_lines = Vec::new();
+        let mut ext_vec: Vec<(&String, &(usize, usize))> = ext_counts.iter().collect();
+        ext_vec.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+
+        for (ext, (count, lines)) in ext_vec {
+            breakdown_lines.push(format!("- {}: {} file{}, {} lines", ext, count, if *count == 1 { "" } else { "s" }, lines));
+        }
+
+        let suffix = if total_files >= file_limit {
+            format!("\nWarning: Walk stopped early because file limit ({}) was reached.", file_limit)
+        } else {
+            "".to_string()
+        };
+
+        Ok(format!(
+            "Project: {} ({} project)\nTotal: {} files, {} lines of code\n\nBreakdown by extension:\n{}\n\nDirectory structure:\n{}{}",
+            tree_root.name,
+            project_type,
+            total_files,
+            total_lines,
+            breakdown_lines.join("\n"),
+            tree_str,
+            suffix
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::memory::MemoryCache;
+
+    #[test]
+    fn test_is_binary_file() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_binary");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let txt_path = temp_dir.join("test.txt");
+        let bin_path = temp_dir.join("test.bin");
+        
+        fs::write(&txt_path, "Hello world").unwrap();
+        fs::write(&bin_path, b"Hello \x00 world").unwrap();
+
+        assert!(!is_binary_file(&txt_path));
+        assert!(is_binary_file(&bin_path));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_detect_project_type() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_project");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        fs::write(temp_dir.join("Cargo.toml"), "").unwrap();
+        assert_eq!(detect_project_type(&temp_dir), "Rust");
+
+        fs::remove_file(temp_dir.join("Cargo.toml")).unwrap();
+        fs::write(temp_dir.join("package.json"), "").unwrap();
+        assert_eq!(detect_project_type(&temp_dir), "Node.js");
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_summarize_codebase_and_compress_directory() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_suite");
+        let src_dir = temp_dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+        fs::write(src_dir.join("main.rs"), "fn main() {\n    // comment\n    println!(\"hello\");\n}").unwrap();
+        fs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: Some(temp_dir.to_string_lossy().into_owned()),
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        // Test summarize_codebase
+        let req = Parameters(SummarizeCodebaseRequest { root_path: None });
+        let summary = server.summarize_codebase(req).await.unwrap();
+        assert!(summary.contains("Project: headroom_test_suite (Rust project)"));
+        assert!(summary.contains("Total: 3 files"));
+        assert!(summary.contains("main.rs"));
+
+        // Test compress_directory
+        let req_comp = Parameters(CompressDirectoryRequest {
+            dir_path: "src".to_string(),
+            extensions: None,
+            max_depth: None,
+            preview: Some(false),
+        });
+        let comp_res = server.compress_directory(req_comp).await.unwrap();
+        assert!(comp_res.contains("Compressed directory"));
+        assert!(comp_res.contains("main.rs"));
+        assert!(comp_res.contains("lib.rs"));
+
+        // Test sandbox rejection
+        let req_err = Parameters(SummarizeCodebaseRequest { root_path: Some("/etc".to_string()) });
+        let summary_err = server.summarize_codebase(req_err).await;
+        assert!(summary_err.is_err());
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_metrics_tracking() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_metrics");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: Some(temp_dir.to_string_lossy().into_owned()),
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let server = HeadroomServer::new(config, cache, metrics.clone());
+
+        // Initial state
+        assert_eq!(metrics.compressions_total.load(Ordering::Relaxed), 0);
+
+        // Compress content
+        let req = Parameters(CompressContentRequest {
+            raw_text: "let x = 1;\n// comment\nlet y = 2;".to_string(),
+            content_type: "code".to_string(),
+            threshold: None,
+            preview: Some(false),
+        });
+        let compressed = server.compress_content(req).await.unwrap();
+        assert!(compressed.contains("ccr_"));
+
+        assert_eq!(metrics.compressions_total.load(Ordering::Relaxed), 1);
+        assert!(metrics.total_bytes_compressed.load(Ordering::Relaxed) > 0);
+
+        // Retrieve original (hit)
+        let req_id = compressed.split("CCR Ref: ").nth(1).unwrap().split(" |").next().unwrap().trim();
+        let req_retrieve = Parameters(RetrieveOriginalRequest { ccr_id: req_id.to_string() });
+        let retrieved = server.retrieve_original(req_retrieve).await.unwrap();
+        assert_eq!(retrieved, "let x = 1;\n// comment\nlet y = 2;");
+
+        assert_eq!(metrics.retrievals_total.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.cache_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.cache_misses.load(Ordering::Relaxed), 0);
+
+        // Retrieve original (miss)
+        let req_miss = Parameters(RetrieveOriginalRequest { ccr_id: "ccr_invalid".to_string() });
+        let _ = server.retrieve_original(req_miss).await;
+        assert_eq!(metrics.cache_misses.load(Ordering::Relaxed), 1);
+
+        // Test server_info contains metrics JSON
+        let req_info = Parameters(ServerInfoRequest {});
+        let info = server.server_info(req_info).await.unwrap();
+        assert!(info.contains("Metrics:"));
+        assert!(info.contains("compressions_total"));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
     }
 }

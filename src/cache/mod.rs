@@ -14,6 +14,7 @@ pub trait CacheBackend: Send + Sync {
     fn search(&self, query: &str) -> Result<Vec<(String, String)>>; // returns list of (ccr_id, snippet/content)
     fn total_bytes(&self) -> Result<usize>;
     fn len(&self) -> Result<usize>;
+    #[allow(dead_code)]
     fn expire_old(&self, max_age_hours: u64) -> Result<usize>;
     fn export_all(&self) -> Result<Vec<(String, String, Option<String>, String)>>;
 }
