@@ -398,6 +398,29 @@ fn detect_project_type(root: &Path) -> String {
     }
 }
 
+fn minify_json_map(map: &mut serde_json::Map<String, serde_json::Value>) {
+    map.remove("description");
+    map.remove("title");
+    map.remove("examples");
+    for (_, v) in map.iter_mut() {
+        minify_json_value(v);
+    }
+}
+
+fn minify_json_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            minify_json_map(map);
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                minify_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[tool_router(server_handler)]
 impl HeadroomServer {
     pub fn new(
@@ -405,8 +428,16 @@ impl HeadroomServer {
         cache: Arc<dyn crate::cache::CacheBackend>,
         metrics: Arc<crate::metrics::Metrics>,
     ) -> Self {
+        let mut tool_router = Self::tool_router();
+        if config.compact_schemas {
+            log_info("Compacting registered tool schemas to save token budget");
+            for (_, route) in tool_router.map.iter_mut() {
+                let input_map = Arc::make_mut(&mut route.attr.input_schema);
+                minify_json_map(input_map);
+            }
+        }
         Self {
-            tool_router: Self::tool_router(),
+            tool_router,
             config,
             cache,
             metrics,
@@ -1445,6 +1476,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1491,6 +1523,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let metrics = Arc::new(crate::metrics::Metrics::new());
@@ -1548,6 +1581,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1581,6 +1615,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1624,6 +1659,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1652,6 +1688,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1676,6 +1713,7 @@ mod tests {
             db_path: None,
             cache_ttl_hours: 0,
             metrics_interval: 0,
+            compact_schemas: false,
         });
         let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
         let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
@@ -1705,5 +1743,31 @@ mod tests {
         assert!(compressed.contains("..."));
         // Struct fields should still be present
         assert!(compressed.contains("val: usize"));
+    }
+
+    #[test]
+    fn test_dynamic_tool_schema_minifier() {
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: None,
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+            compact_schemas: true,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        // Inspect the schemas inside tool_router.map
+        let route = server.tool_router.map.get("compress_content").unwrap();
+        let schema_json = serde_json::to_string(&route.attr.input_schema).unwrap();
+
+        // The input schema parameter descriptions (like "The raw string content to compress.")
+        // should be stripped when compact_schemas is true
+        assert!(!schema_json.contains("The raw string content to compress"));
+        assert!(!schema_json.contains("description"));
     }
 }

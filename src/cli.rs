@@ -35,4 +35,8 @@ pub struct CliArgs {
     /// Metrics reporting interval in seconds (0 = disabled)
     #[arg(long, env = "HEADROOM_METRICS_INTERVAL", default_value_t = 0)]
     pub metrics_interval: u64,
+
+    /// Compact registered tool schemas by removing descriptions/metadata to save token budget
+    #[arg(long, env = "HEADROOM_COMPACT_SCHEMAS")]
+    pub compact_schemas: bool,
 }

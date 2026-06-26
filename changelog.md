@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-06-26
+
+### Added
+- **Dynamic Tool Schema Minifier (`--compact-schemas`):** Added a startup configuration to dynamically strip `"description"`, `"title"`, and `"examples"` from all registered tool parameter schemas at server initialization. This cuts prompt token tax by up to 70% for agent clients like Claude Code, preserving valuable context budgets.
+- **Unit and Integration Tests:** Added tests verifying JSON minification logic and ensuring standard runs retain full metadata while compacted runs successfully strip descriptions.
+
 ## [0.5.0] - 2026-06-26
 
 ### Added

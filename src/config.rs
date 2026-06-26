@@ -18,6 +18,7 @@ pub struct Config {
     pub db_path: Option<String>,
     pub cache_ttl_hours: u64,
     pub metrics_interval: u64,
+    pub compact_schemas: bool,
 }
 
 impl Config {
@@ -31,6 +32,7 @@ impl Config {
             db_path: args.db_path,
             cache_ttl_hours: args.cache_ttl_hours,
             metrics_interval: args.metrics_interval,
+            compact_schemas: args.compact_schemas,
         }
     }
 }

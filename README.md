@@ -110,6 +110,7 @@ You can customize Headroom MCP via command-line arguments or environment variabl
 | `--db-path` | `HEADROOM_DB_PATH` | None | SQLite database path for persistent cache (activates SQLite backend). |
 | `--cache-ttl-hours` | `HEADROOM_CACHE_TTL_HOURS` | `0` | Cache entry TTL in hours (0 = no expiry). |
 | `--metrics-interval` | `HEADROOM_METRICS_INTERVAL` | `0` | Periodic JSON metrics emission to stderr in seconds (0 = disabled). |
+| `--compact-schemas` | `HEADROOM_COMPACT_SCHEMAS` | `false` | Compact registered tool schemas by removing descriptions/metadata to save token budget. |
 
 ---
 
