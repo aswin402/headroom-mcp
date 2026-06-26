@@ -1,3 +1,12 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Editor / IDE configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log

@@ -11,8 +11,7 @@
   "packages": {
     "added_by_agent": [],
     "core": [
-      "anyhow",
-      "clap"
+      "anyhow"
     ]
   },
   "project": {
