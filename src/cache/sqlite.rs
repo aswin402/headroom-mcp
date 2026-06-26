@@ -16,6 +16,8 @@ impl SqliteCache {
         
         // Enable WAL mode for concurrency and speed
         let _ = conn.execute("PRAGMA journal_mode = WAL", []);
+        let _ = conn.execute("PRAGMA synchronous = NORMAL", []);
+        let _ = conn.execute("PRAGMA temp_store = MEMORY", []);
         
         conn.execute(
             "CREATE TABLE IF NOT EXISTS cache_entries (

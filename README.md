@@ -214,10 +214,11 @@ Unlike Python-based alternatives that carry heavy ML libraries, require runtime 
 *   🚀 **Startup Latency:** **< 2ms** from invocation to standard input polling.
 *   💾 **RAM Footprint (Idle):** **< 10MB** (monitored via VmRSS).
 *   📊 **RAM Footprint (Loaded):** Bounded by default to **< 50MB** (under heavy concurrent workloads, guarded by a configurable cache LRU size limit).
-*   📦 **ROM / Executable Size:** **~3.2MB** (fully self-contained, compiled release binary with no external runtimes required).
+*   📦 **ROM / Executable Size:** **< 7MB** (fully self-contained, compiled release binary optimized for size using Link-Time Optimization (LTO), single codegen units, and stripped symbols).
 *   📉 **Processor (CPU) Usage:** Near-zero. Operates completely event-driven via asynchronous `tokio` stdio pipes. Re-compiles expensive Regex engines once on launch using lazy-initialization (`LazyLock`), preventing runtime overhead.
 *   ⏱️ **Compression Speed:** **< 1ms** per minification task on average text inputs.
-*   ⚡ **Lookup Latency:** **< 1μs** for cache retrieval using thread-safe, high-speed memory lookups.
+*   ⚡ **Lookup Latency:** **< 1μs** for cache retrieval, optimized for high concurrency using `std::sync::RwLock` for concurrent read locks and per-entry lock optimization.
+*   🗄️ **SQLite Optimization:** Persistent caching and metadata logging tuned for performance using WAL (Write-Ahead Logging), `synchronous = NORMAL`, and `temp_store = MEMORY` PRAGMAs.
 
 ---
 
@@ -228,7 +229,7 @@ Unlike Python-based alternatives that carry heavy ML libraries, require runtime 
 | **Language** | **Rust** (Edition 2021) | Python 3 | Python 3 |
 | **Startup Latency** | **&lt; 2 ms** (Instant) | ~1.5 - 3.0 seconds | ~500 ms - 1 second |
 | **Idle RAM Footprint** | **&lt; 10 MB** | ~1.5 GB - 2.5 GB | ~50 MB - 100 MB |
-| **Binary/ROM Size** | **~3.2 MB** (Self-contained) | &gt; 1.5 GB (PyTorch models) | ~10 MB - 50 MB |
+| **Binary/ROM Size** | **&lt; 7 MB** (Self-contained) | &gt; 1.5 GB (PyTorch models) | ~10 MB - 50 MB |
 | **CPU Idle Load** | **Near-Zero** (Async Stdio) | Heavy (Torch CPU threads) | Minimal |
 | **Compression Latency** | **&lt; 1 ms** per call | 50ms - 300ms (Embedding inference) | 10ms - 50ms |
 | **External Dependencies**| **None** (No native OpenSSL) | PyTorch, Transformers, HuggingFace | Standard Python libraries |

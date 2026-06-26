@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Instant;
 use chrono::Utc;
 use anyhow::Result;
@@ -7,14 +7,14 @@ use anyhow::Result;
 use super::{CacheBackend, CacheEntry};
 
 pub struct MemoryCache {
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: RwLock<HashMap<String, CacheEntry>>,
     max_bytes: usize,
 }
 
 impl MemoryCache {
     pub fn new(max_bytes: usize) -> Self {
         Self {
-            cache: Mutex::new(HashMap::new()),
+            cache: RwLock::new(HashMap::new()),
             max_bytes,
         }
     }
@@ -22,7 +22,7 @@ impl MemoryCache {
 
 impl CacheBackend for MemoryCache {
     fn insert(&self, id: &str, content: &str, session: Option<&str>) -> Result<()> {
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
         
         // Eviction logic
         let mut total_size: usize = cache.values().map(|entry| entry.content.len()).sum();
@@ -31,8 +31,12 @@ impl CacheBackend for MemoryCache {
             let mut oldest_time = Instant::now();
             
             for (k, entry) in cache.iter() {
-                if entry.last_accessed < oldest_time {
-                    oldest_time = entry.last_accessed;
+                let entry_last_accessed = match entry.last_accessed.lock() {
+                    Ok(guard) => *guard,
+                    Err(poisoned) => *poisoned.into_inner(),
+                };
+                if entry_last_accessed < oldest_time {
+                    oldest_time = entry_last_accessed;
                     oldest_key = Some(k.clone());
                 }
             }
@@ -51,7 +55,7 @@ impl CacheBackend for MemoryCache {
             id.to_string(),
             CacheEntry {
                 content: content.to_string(),
-                last_accessed: Instant::now(),
+                last_accessed: std::sync::Mutex::new(Instant::now()),
                 session: session.map(String::from),
                 created_at,
             },
@@ -60,9 +64,13 @@ impl CacheBackend for MemoryCache {
     }
 
     fn get(&self, id: &str) -> Result<Option<String>> {
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(entry) = cache.get_mut(id) {
-            entry.last_accessed = Instant::now();
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = cache.get(id) {
+            let mut last = match entry.last_accessed.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *last = Instant::now();
             Ok(Some(entry.content.clone()))
         } else {
             Ok(None)
@@ -70,7 +78,7 @@ impl CacheBackend for MemoryCache {
     }
 
     fn remove(&self, id: &str) -> Result<Option<usize>> {
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = cache.remove(id) {
             Ok(Some(entry.content.len()))
         } else {
@@ -79,7 +87,7 @@ impl CacheBackend for MemoryCache {
     }
 
     fn clear(&self) -> Result<(usize, usize)> {
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
         let count = cache.len();
         let total_bytes: usize = cache.values().map(|entry| entry.content.len()).sum();
         cache.clear();
@@ -87,7 +95,7 @@ impl CacheBackend for MemoryCache {
     }
 
     fn stats(&self) -> Result<Vec<(String, usize)>> {
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         let mut stats = Vec::new();
         for (k, entry) in cache.iter() {
             stats.push((k.clone(), entry.content.len()));
@@ -96,7 +104,7 @@ impl CacheBackend for MemoryCache {
     }
 
     fn search(&self, query: &str) -> Result<Vec<(String, String)>> {
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
         for (id, entry) in cache.iter() {
@@ -118,12 +126,12 @@ impl CacheBackend for MemoryCache {
     }
 
     fn total_bytes(&self) -> Result<usize> {
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         Ok(cache.values().map(|entry| entry.content.len()).sum())
     }
 
     fn len(&self) -> Result<usize> {
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         Ok(cache.len())
     }
 
@@ -131,10 +139,14 @@ impl CacheBackend for MemoryCache {
         if max_age_hours == 0 {
             return Ok(0);
         }
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
         let mut to_remove = Vec::new();
         for (k, entry) in cache.iter() {
-            if entry.last_accessed.elapsed().as_secs() > max_age_hours * 3600 {
+            let last_accessed = match entry.last_accessed.lock() {
+                Ok(guard) => *guard,
+                Err(poisoned) => *poisoned.into_inner(),
+            };
+            if last_accessed.elapsed().as_secs() > max_age_hours * 3600 {
                 to_remove.push(k.clone());
             }
         }
@@ -146,7 +158,7 @@ impl CacheBackend for MemoryCache {
     }
 
     fn export_all(&self) -> Result<Vec<(String, String, Option<String>, String)>> {
-        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         let mut results = Vec::new();
         for (id, entry) in cache.iter() {
             results.push((id.clone(), entry.content.clone(), entry.session.clone(), entry.created_at.clone()));
