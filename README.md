@@ -247,7 +247,7 @@ Ensure you have the Rust toolchain installed, then clone the project and compile
 ```bash
 cargo build --release
 ```
-The resulting binary is output to [target/release/headroom-mcp](file:///home/aswin/programming/vscode/myProjects/ai_agent_tools/agentcpower/target/release/headroom-mcp).
+The resulting binary is output to [target/release/headroom-mcp](file:///home/aswin/programming/vscode/myProjects/target/release/headroom-mcp).
 
 ### 2. Claude Desktop Integration
 Open your `claude_desktop_config.json` configuration file (Mac: `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows: `%APPDATA%/Claude/claude_desktop_config.json`):
@@ -256,8 +256,8 @@ Open your `claude_desktop_config.json` configuration file (Mac: `~/Library/Appli
 {
   "mcpServers": {
     "headroom-mcp": {
-      "command": "/absolute/path/to/agentcpower/target/release/headroom-mcp",
-      "args": ["--db-path", "/absolute/path/to/cache.db", "--enforce-yagni"]
+      "command": "/home/aswin/programming/vscode/myProjects/target/release/headroom-mcp",
+      "args": ["--db-path", "/home/aswin/.agentvault/headroom.db", "--enforce-yagni"]
     }
   }
 }
@@ -266,8 +266,23 @@ Open your `claude_desktop_config.json` configuration file (Mac: `~/Library/Appli
 ### 3. Claude Code Integration
 Add the server via the command-line helper:
 ```bash
-claude mcp add headroom-mcp /absolute/path/to/agentcpower/target/release/headroom-mcp -- --db-path /absolute/path/to/cache.db
+claude mcp add headroom-mcp /home/aswin/programming/vscode/myProjects/target/release/headroom-mcp -- --db-path /home/aswin/.agentvault/headroom.db
 ```
+
+### 4. AgentVault Integration
+Register and install Headroom MCP globally within the AgentVault capability registry:
+```bash
+vault install local:/home/aswin/programming/vscode/myProjects/target/release/headroom-mcp \
+  --name headroom-mcp \
+  --agent gemini \
+  --args="--db-path" --args="/home/aswin/.agentvault/headroom.db" --args="--enforce-yagni"
+```
+
+Synchronize the configuration directly with the active agent connector:
+```bash
+vault sync gemini
+```
+
 
 ---
 
