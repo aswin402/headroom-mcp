@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-06-26
+
+### Added
+- **HTTP Scraper Tool (`compress_url`):** Fetches URLs with timeout constraints, converting HTML responses to markdown and compressing JSON payloads directly.
+- **Command Sandbox Tool (`run_and_compress`):** Executes shell commands securely within the workspace root, capturing, scoring, and returning compressed stdout/stderr outputs to save context tokens.
+- **KV Cache Alignment (`cache_align`):** Deterministically sorts, pads, and wraps context chunks to stabilize block offsets and maximize provider KV cache hit rates.
+- **Tool Schema Minifier (`compress_schema`):** Recursively strips descriptions and formatting from JSON tool schemas to minimize the token footprint of large toolsets.
+- **Syntax-Aware Signature Extraction:** Adds AST-like signature-only compression for Rust, Python, and JavaScript/TypeScript files, truncating function bodies to `{ ... }` while retaining struct definitions and imports.
+
+### Changed
+- **Pure Rust HTTPS TLS:** Configured `reqwest` to use `rustls-tls` to remove native OpenSSL dependencies for zero-configuration, cross-platform compilation.
+- **Extended Compression Tools:** Added `signatures_only` parameter to content, file, and directory compression APIs.
+
 ## [0.4.0] - 2026-06-26
 
 ### Added

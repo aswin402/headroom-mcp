@@ -22,16 +22,12 @@
 
 ## Features
 
-*   **Recursive Directory Scoping (`DOX`):** Automatically aggregates localized developer rules from the root down to the target folder, preventing rule dilution and context window bloat. Supports `AGENTS.md`, `CLAUDE.md`, `CURSOR.md`, and `.cursorrules`.
-*   **JSON Array Crusher:** Summarizes large arrays of JSON objects by extracting unique schemas and printing just the first element, saving up to 90% tokens on structured data.
-*   **AST-Aware Code Minifier:** Strips C-style comments (`//`, `/* */`), Python/Shell hash comments (`#`), SQL comments (`--`), HTML comments (`<!-- -->`), and collapses empty whitespace.
-*   **Log Purger & Deduplicator:** Automatically strips ANSI escape/color sequences, deduplicates consecutive duplicate log lines (replacing them with `[repeated N times]` labels), and keeps the beginning and trailing log snippets.
-*   **CSV Crusher:** Summarizes CSV datasets by displaying headers, the first three rows, and total row counts.
-*   **Reversible CCR Storage:** Safe, non-lossy prompt compression. The original verbose contents are indexed in a high-speed, thread-safe memory cache and retrieved by the LLM on-demand.
-*   **Memory Bounded Cache (LRU):** Employs size-based LRU cache eviction limiting memory footprint to a maximum of 100MB.
-*   **Auto-detection of Content Types:** Autodetects content structure or resolves file extensions automatically to apply the correct compression algorithm.
-*   **Configurable Compression Thresholds:** Supports custom limits per request so clients can dynamically tune minification behavior.
-*   **Zero External Dependencies:** Built entirely in native Rust. No PyTorch, Python runtimes, Node.js packages, or Docker containers required.
+*   **Syntax-Aware Signature Extraction:** Supports lightweight AST-like signature-only compression for Rust, Python, and JavaScript/TypeScript. Replaces function bodies with `{ ... }` while retaining struct/class structures, imports, and contracts.
+*   **HTTP Scraping & Page Compressing (`compress_url`):** Safely fetches external HTML pages or JSON APIs with a timeout, converting HTML to clean markdown before compression.
+*   **Command Sandbox Executor (`run_and_compress`):** Executes shell commands securely within the workspace root, returning only compressed stdout/stderr traces to keep your LLM context clean.
+*   **KV Cache Alignment & Schema Minification:** Deterministically sorts, pads, and wraps context blocks (`cache_align`) to maximize provider-side caching, and strips descriptions from JSON tool schemas (`compress_schema`) to optimize token consumption.
+*   **Zero External Dependencies:** Built entirely in native Rust with no PyTorch, Node.js packages, or Python dependencies.
+
 
 ---
 
@@ -79,11 +75,11 @@ graph TD
 | Tool | Parameters | Description |
 | :--- | :--- | :--- |
 | `scope_context` | `target_path` | Walks directory hierarchy to aggregate rules files (AGENTS.md, CLAUDE.md, etc.). |
-| `compress_content` | `raw_text`, `content_type`, `threshold` (optional), `preview` (optional) | Compresses raw text dynamically and caches the original content. |
+| `compress_content` | `raw_text`, `content_type`, `threshold` (optional), `preview` (optional), `signatures_only` (optional) | Compresses raw text dynamically and caches the original content. |
 | `retrieve_original` | `ccr_id` | Retrieves original uncompressed content or reads a workspace file. |
-| `compress_file` | `file_path`, `content_type` (optional), `threshold` (optional), `preview` (optional) | Reads a file from workspace, compresses, caches, and returns CCR reference. |
+| `compress_file` | `file_path`, `content_type` (optional), `threshold` (optional), `preview` (optional), `signatures_only` (optional) | Reads a file from workspace, compresses, caches, and returns CCR reference. |
 | `compress_diff` | `diff_text`, `preview` (optional) | Parses unified diffs, counts insertions/deletions/hunks, and formats a summary. |
-| `compress_directory` | `dir_path`, `extensions` (optional), `max_depth` (optional), `preview` (optional) | Walks a directory recursively, compressing and caching each text file. |
+| `compress_directory` | `dir_path`, `extensions` (optional), `max_depth` (optional), `preview` (optional), `signatures_only` (optional) | Walks a directory recursively, compressing and caching each text file. |
 | `summarize_codebase` | `root_path` (optional) | Analyzes codebase type, files, line counts, and outputs a formatted folder structure tree. |
 | `search_cache` | `query`, `max_results` (optional) | Searches cached entries by keyword using FTS5 SQLite index or substring matching. |
 | `export_cache` | `file_path` | Dumps the entire cache to a portable JSON file inside the workspace. |
@@ -93,6 +89,10 @@ graph TD
 | `server_info` | None | Returns version, uptime, cache usage, cumulative metrics, and configuration. |
 | `ping` | None | Health check. Returns `"ok"`. |
 | `count_tokens` | `text` | Estimates the token count for a given text. |
+| `compress_url` | `url` | Fetches a URL, converts HTML to clean markdown, and compresses the content. |
+| `run_and_compress` | `command`, `args` (optional) | Runs a shell command inside the workspace root, returning only compressed stdout/stderr. |
+| `cache_align` | `chunks`, `padding_size` (optional) | Aligns context chunks deterministically, padding and wrapping them to optimize KV cache hits. |
+| `compress_schema` | `schema` | Minifies JSON tool definitions or schemas by stripping optional description fields. |
 
 ---
 

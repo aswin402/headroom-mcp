@@ -12,12 +12,12 @@ use std::time::Instant;
 use crate::config::{Config, SCOPE_FILES};
 use crate::intelligence::tokens::estimate_tokens;
 use crate::compression::{
-    auto_detect_content_type, compress_code, compress_csv, compress_json, compress_logs,
+    auto_detect_content_type, compress_csv, compress_json, compress_logs,
     detect_content_type_from_ext,
 };
 use crate::compression::diff::compress_diff;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct HeadroomServer {
@@ -48,6 +48,8 @@ pub struct CompressContentRequest {
     pub threshold: Option<usize>,
     #[schemars(description = "If true, returns a preview of compression without caching.")]
     pub preview: Option<bool>,
+    #[schemars(description = "If true, extracts only structural code signatures (functions/classes) and discards bodies.")]
+    pub signatures_only: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -66,6 +68,8 @@ pub struct CompressFileRequest {
     pub threshold: Option<usize>,
     #[schemars(description = "If true, returns a preview of compression without caching.")]
     pub preview: Option<bool>,
+    #[schemars(description = "If true, extracts only structural code signatures (functions/classes) and discards bodies.")]
+    pub signatures_only: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -124,6 +128,8 @@ pub struct CompressDirectoryRequest {
     pub max_depth: Option<usize>,
     #[schemars(description = "If true, returns a preview of compression without caching.")]
     pub preview: Option<bool>,
+    #[schemars(description = "If true, extracts only structural code signatures (functions/classes) and discards bodies.")]
+    pub signatures_only: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -132,15 +138,43 @@ pub struct SummarizeCodebaseRequest {
     pub root_path: Option<String>,
 }
 
-fn mcp_error<E: std::fmt::Display>(err: E) -> rmcp::ErrorData {
+#[derive(Deserialize, JsonSchema)]
+pub struct CompressUrlRequest {
+    #[schemars(description = "The HTTP/HTTPS URL to fetch and compress.")]
+    pub url: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RunAndCompressRequest {
+    #[schemars(description = "The shell command to run.")]
+    pub command: String,
+    #[schemars(description = "Optional arguments to pass to the command.")]
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CacheAlignRequest {
+    #[schemars(description = "The text chunks to align.")]
+    pub chunks: Vec<String>,
+    #[schemars(description = "Optional custom padding size (default: 1024 characters).")]
+    pub padding_size: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CompressSchemaRequest {
+    #[schemars(description = "The JSON schema to minify.")]
+    pub schema: String,
+}
+
+pub(crate) fn mcp_error<E: std::fmt::Display>(err: E) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
 }
 
-fn log_info(msg: &str) {
+pub(crate) fn log_info(msg: &str) {
     eprintln!("[Headroom MCP] [INFO] {}", msg);
 }
 
-fn log_error(msg: &str) {
+pub(crate) fn log_error(msg: &str) {
     eprintln!("[Headroom MCP] [ERROR] {}", msg);
 }
 
@@ -547,7 +581,10 @@ impl HeadroomServer {
         let threshold = req.0.threshold;
         let compressed = match content_type_ref {
             "json" => compress_json(raw_text, threshold.unwrap_or(self.config.json_threshold)).map_err(mcp_error)?,
-            "code" | "yaml" | "markdown" => compress_code(raw_text),
+            "code" | "yaml" | "markdown" => {
+                let signatures_only = req.0.signatures_only.unwrap_or(false);
+                crate::compression::code::compress_code_with_options(raw_text, signatures_only, "")
+            }
             "csv" => compress_csv(raw_text),
             _ => compress_logs(raw_text, threshold.unwrap_or(self.config.log_threshold)),
         };
@@ -724,9 +761,13 @@ impl HeadroomServer {
         };
 
         let threshold = req.0.threshold;
+        let ext = canonical.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let compressed = match content_type_ref {
             "json" => compress_json(&raw_text, threshold.unwrap_or(self.config.json_threshold)).map_err(mcp_error)?,
-            "code" | "yaml" | "markdown" => compress_code(&raw_text),
+            "code" | "yaml" | "markdown" => {
+                let signatures_only = req.0.signatures_only.unwrap_or(false);
+                crate::compression::code::compress_code_with_options(&raw_text, signatures_only, ext)
+            }
             "csv" => compress_csv(&raw_text),
             _ => compress_logs(&raw_text, threshold.unwrap_or(self.config.log_threshold)),
         };
@@ -1107,12 +1148,16 @@ impl HeadroomServer {
             let content_type_ref = detect_content_type_from_ext(path)
                 .unwrap_or_else(|| auto_detect_content_type(&raw_text));
 
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let compressed = match content_type_ref {
                 "json" => match compress_json(&raw_text, self.config.json_threshold) {
                     Ok(c) => c,
                     Err(_) => continue,
                 },
-                "code" | "yaml" | "markdown" => compress_code(&raw_text),
+                "code" | "yaml" | "markdown" => {
+                    let signatures_only = req.0.signatures_only.unwrap_or(false);
+                    crate::compression::code::compress_code_with_options(&raw_text, signatures_only, ext)
+                }
                 "csv" => compress_csv(&raw_text),
                 _ => compress_logs(&raw_text, self.config.log_threshold),
             };
@@ -1303,6 +1348,46 @@ impl HeadroomServer {
             suffix
         ))
     }
+
+    #[tool(
+        description = "Fetches a URL, extracts its text content, and returns a compressed summary with a CCR reference."
+    )]
+    async fn compress_url(
+        &self,
+        req: Parameters<CompressUrlRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        crate::tools::web::compress_url(self, req.0.url).await
+    }
+
+    #[tool(
+        description = "Executes a shell command in the sandboxed workspace root and returns its compressed output with a CCR reference."
+    )]
+    async fn run_and_compress(
+        &self,
+        req: Parameters<RunAndCompressRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        crate::tools::exec::run_and_compress(self, req.0.command, req.0.args).await
+    }
+
+    #[tool(
+        description = "Aligns context chunks deterministically, padding and wrapping them to optimize KV cache hits for LLM providers."
+    )]
+    async fn cache_align(
+        &self,
+        req: Parameters<CacheAlignRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        crate::tools::cache_align::cache_align(self, req.0.chunks, req.0.padding_size).await
+    }
+
+    #[tool(
+        description = "Minifies a JSON schema representation of MCP tools, stripping descriptions and comments to save token budget."
+    )]
+    async fn compress_schema(
+        &self,
+        req: Parameters<CompressSchemaRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        crate::tools::schema::compress_schema(self, req.0.schema).await
+    }
 }
 
 #[cfg(test)]
@@ -1377,6 +1462,7 @@ mod tests {
             extensions: None,
             max_depth: None,
             preview: Some(false),
+            signatures_only: None,
         });
         let comp_res = server.compress_directory(req_comp).await.unwrap();
         assert!(comp_res.contains("Compressed directory"));
@@ -1419,6 +1505,7 @@ mod tests {
             content_type: "code".to_string(),
             threshold: None,
             preview: Some(false),
+            signatures_only: None,
         });
         let compressed = server.compress_content(req).await.unwrap();
         assert!(compressed.contains("ccr_"));
@@ -1448,5 +1535,175 @@ mod tests {
         assert!(info.contains("compressions_total"));
 
         fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cache_align() {
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: None,
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        let req = Parameters(CacheAlignRequest {
+            chunks: vec!["chunk b".to_string(), "chunk a".to_string()],
+            padding_size: Some(16),
+        });
+
+        let aligned = server.cache_align(req).await.unwrap();
+
+        // Should sort alphabetically so chunk a comes first
+        assert!(aligned.find("chunk a").unwrap() < aligned.find("chunk b").unwrap());
+
+        // Verify structure and padding: chunk a (7 chars) + 9 spaces padding = 16 chars
+        assert!(aligned.contains("chunk a         "));
+        // chunk b (7 chars) + 9 spaces padding = 16 chars
+        assert!(aligned.contains("chunk b         "));
+        assert!(aligned.contains("<!-- chunk: "));
+        assert!(aligned.contains("<!-- endchunk -->"));
+    }
+
+    #[tokio::test]
+    async fn test_compress_schema() {
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: None,
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        let schema_input = r#"{
+            "title": "My Test Tool",
+            "description": "A tool for testing purposes",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Item name"
+                }
+            }
+        }"#;
+
+        let req = Parameters(CompressSchemaRequest {
+            schema: schema_input.to_string(),
+        });
+
+        let compressed = server.compress_schema(req).await.unwrap();
+        // Check that description and title keys are stripped, leaving only minified structure
+        assert!(!compressed.contains("description"));
+        assert!(!compressed.contains("title"));
+        assert!(compressed.contains("name"));
+        assert!(compressed.contains("properties"));
+        // Should be minified
+        assert!(!compressed.contains("\n"));
+    }
+
+    #[tokio::test]
+    async fn test_run_and_compress() {
+        let temp_dir = std::env::temp_dir().join("headroom_test_run_cmd");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: Some(temp_dir.to_string_lossy().into_owned()),
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        // Run echo command
+        let req = Parameters(RunAndCompressRequest {
+            command: "echo".to_string(),
+            args: Some(vec!["hello headroom".to_string()]),
+        });
+
+        let result = server.run_and_compress(req).await.unwrap();
+        assert!(result.contains("hello headroom"));
+        assert!(result.contains("CCR Ref: ccr_"));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_compress_url_invalid() {
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: None,
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        let req = Parameters(CompressUrlRequest {
+            url: "http://invalid.url.local:12345/foo".to_string(),
+        });
+
+        let result = server.compress_url(req).await;
+        // Should fail due to DNS lookup/connection failure
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_signatures_only_integration() {
+        let config = Arc::new(Config {
+            log_threshold: 50_000,
+            json_threshold: 10_000,
+            max_input_size: 10 * 1024 * 1024,
+            max_cache_bytes: 100 * 1024 * 1024,
+            workspace_root: None,
+            db_path: None,
+            cache_ttl_hours: 0,
+            metrics_interval: 0,
+        });
+        let cache = Arc::new(MemoryCache::new(100 * 1024 * 1024));
+        let server = HeadroomServer::new(config, cache, Arc::new(crate::metrics::Metrics::new()));
+
+        let code_input = r#"
+        pub struct Bar {
+            val: usize,
+        }
+        impl Bar {
+            pub fn run(&self) {
+                let x = 123;
+                println!("{}", x);
+            }
+        }
+        "#;
+
+        let req = Parameters(CompressContentRequest {
+            raw_text: code_input.to_string(),
+            content_type: "code".to_string(),
+            threshold: None,
+            preview: Some(true),
+            signatures_only: Some(true),
+        });
+
+        let compressed = server.compress_content(req).await.unwrap();
+        // Check that function body has been replaced with the ... placeholder
+        assert!(compressed.contains("..."));
+        // Struct fields should still be present
+        assert!(compressed.contains("val: usize"));
     }
 }

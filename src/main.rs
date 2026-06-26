@@ -5,6 +5,7 @@ mod config;
 mod intelligence;
 mod server;
 mod metrics;
+mod tools;
 
 use clap::Parser;
 use rmcp::{transport::stdio, ServiceExt};

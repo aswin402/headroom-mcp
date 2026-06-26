@@ -8,13 +8,20 @@ pub mod json;
 pub mod code;
 pub mod csv;
 pub mod logs;
+pub mod syntax;
 
 // Re-export all public functions to preserve the public API.
 #[allow(unused_imports)]
 pub use helpers::{safe_tail, safe_truncate};
+#[allow(unused_imports)]
 pub use detect::{auto_detect_content_type, detect_content_type_from_ext};
+#[allow(unused_imports)]
 pub use json::compress_json;
-pub use code::compress_code;
+#[allow(unused_imports)]
+pub use code::{compress_code, compress_code_with_options};
+#[allow(unused_imports)]
 pub use csv::compress_csv;
 #[allow(unused_imports)]
 pub use logs::{compress_logs, deduplicate_log_lines};
+#[allow(unused_imports)]
+pub use syntax::extract_signatures;

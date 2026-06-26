@@ -11,7 +11,17 @@ static RE_LINE_COMMENTS: LazyLock<Regex> = LazyLock::new(|| {
 static RE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n\s*\n").unwrap());
 
 pub fn compress_code(raw_code: &str) -> String {
-    let no_blocks = RE_BLOCK_COMMENT.replace_all(raw_code, "");
+    compress_code_with_options(raw_code, false, "")
+}
+
+pub fn compress_code_with_options(raw_code: &str, signatures_only: bool, extension: &str) -> String {
+    let base_code = if signatures_only {
+        crate::compression::syntax::extract_signatures(raw_code, extension)
+    } else {
+        raw_code.to_string()
+    };
+
+    let no_blocks = RE_BLOCK_COMMENT.replace_all(&base_code, "");
     let no_html = RE_HTML_COMMENT.replace_all(&no_blocks, "");
     let no_comments = RE_LINE_COMMENTS.replace_all(&no_html, "");
     let collapsed = RE_BLANK_LINES.replace_all(&no_comments, "\n");
